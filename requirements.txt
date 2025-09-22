@@ -1,11 +1,8 @@
-
 python-dotenv==1.0.0
 deep-translator==1.11.4
-Pillow==10.3.0
+Pillow==9.5.0  # Try 9.5.0 (stable, less likely to fail)
 aiohttp==3.9.5
-dnspython==2.4.2
 aiogram==3.13.1
-pillow
-qrcode
-telethon
-textwrap
+qrcode==7.4.2
+telethon==1.36.0
+wheel==0.44.0  # Helps with wheel builds
