@@ -35,7 +35,12 @@ from telethon.tl.types import ChatAdminRights
 from aiogram import Bot
 import time
 from aiogram.filters import Command
-from telethon.errors import SessionPasswordNeededError, FloodWaitError
+import logging
+from telethon.errors import SessionPasswordNeededError, FloodWaitError, RPCError
+
+# Configure logging for detailed debugging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 # Load environment variables
 load_dotenv()
 
@@ -667,51 +672,62 @@ class TelegramGroupManager:
         self.conn.commit()
 
     async def initialize(self):
-        """Initialize the Telethon client with retries"""
+        """Initialize the Telethon client with retries and detailed logging"""
         try:
             if not all([TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_SESSION]):
-                print("❌ Telegram API credentials missing")
+                logger.error("Missing Telegram API credentials: API_ID=%s, API_HASH=%s, SESSION=%s",
+                            TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_SESSION)
                 return False
 
             self.client = TelegramClient(
                 TELEGRAM_SESSION,
                 TELEGRAM_API_ID,
                 TELEGRAM_API_HASH,
-                connection_retries=5,  # Increased retries
-                retry_delay=3,  # Increased delay
-                auto_reconnect=True  # Enable auto-reconnect
+                connection_retries=5,
+                retry_delay=3,
+                auto_reconnect=True,
+                timeout=30  # Increased timeout
             )
 
             for attempt in range(5):
                 try:
+                    logger.info("Attempting to connect Telethon client (attempt %d)", attempt + 1)
                     await self.client.connect()
                     if not await self.client.is_user_authorized():
-                        print("❌ Session not authorized. Please generate session file locally.")
+                        logger.error("Session not authorized. Ensure escrow_bot.session is valid.")
                         return False
                     self.initialized = True
-                    print("✅ Telethon client initialized")
+                    logger.info("Telethon client initialized successfully")
                     return True
-                except Exception as e:
-                    print(f"⚠️ Connection attempt {attempt + 1} failed: {e}")
+                except RPCError as e:
+                    logger.warning("Connection attempt %d failed: %s", attempt + 1, str(e))
                     if attempt < 4:
                         await asyncio.sleep(3)
                     continue
-            print("❌ Failed to connect after retries")
+                except Exception as e:
+                    logger.error("Unexpected error during connection attempt %d: %s", attempt + 1, str(e))
+                    if attempt < 4:
+                        await asyncio.sleep(3)
+                    continue
+            logger.error("Failed to connect Telethon client after 5 attempts")
             return False
 
         except Exception as e:
-            print(f"❌ Failed to initialize Telethon client: {e}")
+            logger.error("Failed to initialize Telethon client: %s", str(e))
             return False
 
     async def create_escrow_group(self, creator_id, creator_name, with_admins=True):
         """Create a Telegram supergroup for escrow transactions"""
         try:
             if not self.initialized:
+                logger.info("Initializing Telethon client for group creation")
                 if not await self.initialize():
+                    logger.error("Telethon client initialization failed")
                     return {"success": False, "error": "Telethon client not initialized"}
 
             group_id = f"escrow_{creator_id}_{int(time.time())}"
             group_name = f"CoinHold Escrow #{group_id[-6:].upper()}"
+            logger.info("Creating group: %s", group_name)
 
             # Create the supergroup
             result = await self.client(CreateChannelRequest(
@@ -722,23 +738,20 @@ class TelegramGroupManager:
 
             chat = result.chats[0]
             chat_id = chat.id
+            logger.info("Group created: chat_id=%d", chat_id)
 
             # Export invite link
-            invite = await self.client(ExportChatInviteRequest(
-                peer=chat_id
-            ))
+            invite = await self.client(ExportChatInviteRequest(peer=chat_id))
             invite_link = invite.link
+            logger.info("Invite link generated: %s", invite_link)
 
             # Add the bot to the group
             try:
                 bot_entity = await self.client.get_entity(BOT_USERNAME)
-                await self.client(InviteToChannelRequest(
-                    channel=chat,
-                    users=[bot_entity]
-                ))
-                print(f"✅ Bot {BOT_USERNAME} added to {group_name}")
+                await self.client(InviteToChannelRequest(channel=chat, users=[bot_entity]))
+                logger.info("Bot %s added to %s", BOT_USERNAME, group_name)
             except Exception as e:
-                print(f"❌ Failed to add bot: {e}")
+                logger.error("Failed to add bot to group: %s", str(e))
                 return {"success": False, "error": f"Failed to add bot: {e}"}
 
             # Promote bot to admin
@@ -761,20 +774,17 @@ class TelegramGroupManager:
                     admin_rights=rights,
                     rank="Escrow Bot"
                 ))
-                print(f"✅ Bot promoted to admin in {group_name}")
+                logger.info("Bot promoted to admin in %s", group_name)
             except Exception as e:
-                print(f"⚠️ Failed to promote bot: {e}")
+                logger.warning("Failed to promote bot: %s", str(e))
 
             # Add creator to the group
             try:
                 creator_entity = await self.client.get_entity(creator_id)
-                await self.client(InviteToChannelRequest(
-                    channel=chat,
-                    users=[creator_entity]
-                ))
-                print(f"✅ Creator added to {group_name}")
+                await self.client(InviteToChannelRequest(channel=chat, users=[creator_entity]))
+                logger.info("Creator %s added to %s", creator_id, group_name)
             except Exception as e:
-                print(f"⚠️ Failed to add creator: {e}")
+                logger.warning("Failed to add creator: %s", str(e))
 
             # Send welcome message
             welcome_msg = (
@@ -789,14 +799,10 @@ class TelegramGroupManager:
             )
 
             try:
-                await self.client.send_message(
-                    entity=chat_id,
-                    message=welcome_msg,
-                    parse_mode='HTML'
-                )
-                print(f"✅ Welcome message sent to {group_name}")
+                await self.client.send_message(entity=chat_id, message=welcome_msg, parse_mode='HTML')
+                logger.info("Welcome message sent to %s", group_name)
             except Exception as e:
-                print(f"⚠️ Failed to send welcome message: {e}")
+                logger.warning("Failed to send welcome message: %s", str(e))
 
             # Save to database
             cursor = self.conn.cursor()
@@ -806,6 +812,7 @@ class TelegramGroupManager:
                 VALUES (?, ?, ?, ?, ?, ?)
             ''', (group_id, chat_id, creator_id, invite_link, int(time.time()), int(with_admins)))
             self.conn.commit()
+            logger.info("Group data saved to database")
 
             return {
                 "success": True,
@@ -815,18 +822,23 @@ class TelegramGroupManager:
             }
 
         except FloodWaitError as e:
-            print(f"⚠️ Flood wait error: Must wait {e.seconds} seconds")
+            logger.warning("Flood wait error: Must wait %d seconds", e.seconds)
             await asyncio.sleep(e.seconds)
             return {"success": False, "error": f"Flood wait: {e.seconds} seconds"}
+        except RPCError as e:
+            logger.error("Telegram RPC error creating group: %s", str(e))
+            return {"success": False, "error": str(e)}
         except Exception as e:
-            print(f"❌ Error creating group: {e}")
+            logger.error("Error creating group: %s", str(e))
             return {"success": False, "error": str(e)}
 
     async def create_verification_group(self, user_id: int, user_name: str, group_name: str):
         """Create a Telegram supergroup for verification"""
         try:
             if not self.initialized:
+                logger.info("Initializing Telethon client for verification group")
                 if not await self.initialize():
+                    logger.error("Telethon client initialization failed")
                     return {"success": False, "error": "Telethon client not initialized"}
 
             result = await self.client(CreateChannelRequest(
@@ -837,35 +849,29 @@ class TelegramGroupManager:
 
             chat = result.chats[0]
             chat_id = chat.id
+            logger.info("Verification group created: chat_id=%d", chat_id)
 
             # Export invite link
-            invite = await self.client(ExportChatInviteRequest(
-                peer=chat_id
-            ))
+            invite = await self.client(ExportChatInviteRequest(peer=chat_id))
             invite_link = invite.link
+            logger.info("Invite link generated: %s", invite_link)
 
             # Invite the user
             try:
                 user_entity = await self.client.get_entity(user_id)
-                await self.client(InviteToChannelRequest(
-                    channel=chat,
-                    users=[user_entity]
-                ))
-                print(f"✅ User {user_name} invited to verification group")
+                await self.client(InviteToChannelRequest(channel=chat, users=[user_entity]))
+                logger.info("User %s invited to verification group", user_name)
             except Exception as e:
-                print(f"⚠️ Could not invite user: {e}")
+                logger.warning("Could not invite user: %s", str(e))
 
             # Invite the bot
             if BOT_USERNAME:
                 try:
                     bot_entity = await self.client.get_entity(BOT_USERNAME)
-                    await self.client(InviteToChannelRequest(
-                        channel=chat,
-                        users=[bot_entity]
-                    ))
-                    print(f"✅ Bot {BOT_USERNAME} invited to verification group")
+                    await self.client(InviteToChannelRequest(channel=chat, users=[bot_entity]))
+                    logger.info("Bot %s invited to verification group", BOT_USERNAME)
                 except Exception as e:
-                    print(f"⚠️ Could not invite bot: {e}")
+                    logger.warning("Could not invite bot: %s", str(e))
 
             # Promote the bot to admin
             if BOT_USERNAME:
@@ -889,9 +895,9 @@ class TelegramGroupManager:
                         admin_rights=rights,
                         rank="Verification Bot"
                     ))
-                    print(f"✅ Bot promoted to admin in verification group")
+                    logger.info("Bot promoted to admin in verification group")
                 except Exception as e:
-                    print(f"⚠️ Failed to promote bot: {e}")
+                    logger.warning("Failed to promote bot: %s", str(e))
 
             return {
                 "success": True,
@@ -901,29 +907,31 @@ class TelegramGroupManager:
             }
 
         except FloodWaitError as e:
-            print(f"⚠️ Flood wait error: Must wait {e.seconds} seconds")
+            logger.warning("Flood wait error: Must wait %d seconds", e.seconds)
             await asyncio.sleep(e.seconds)
             return {"success": False, "error": f"Flood wait: {e.seconds} seconds"}
+        except RPCError as e:
+            logger.error("Telegram RPC error creating verification group: %s", str(e))
+            return {"success": False, "error": str(e)}
         except Exception as e:
-            print(f"❌ Error creating verification group: {e}")
+            logger.error("Error creating verification group: %s", str(e))
             return {"success": False, "error": str(e)}
 
     async def add_user_to_group(self, group_id, user_id):
         """Add a user to the group"""
         try:
             if not self.initialized:
+                logger.info("Initializing Telethon client for adding user")
                 if not await self.initialize():
+                    logger.error("Telethon client initialization failed")
                     return False
 
             user_entity = await self.client.get_input_entity(user_id)
-            await self.client(InviteToChannelRequest(
-                channel=group_id,
-                users=[user_entity]
-            ))
-            print(f"✅ User {user_id} added to group {group_id}")
+            await self.client(InviteToChannelRequest(channel=group_id, users=[user_entity]))
+            logger.info("User %s added to group %s", user_id, group_id)
             return True
         except Exception as e:
-            print(f"❌ Error adding user to group: {e}")
+            logger.error("Error adding user to group: %s", str(e))
             return False
 
     async def _promote_all_members(self, chat):
@@ -950,24 +958,25 @@ class TelegramGroupManager:
                         admin_rights=rights,
                         rank="Admin"
                     ))
-                    print(f"✅ Promoted {getattr(participant, 'id', 'unknown')} to admin")
+                    logger.info("Promoted %s to admin", getattr(participant, 'id', 'unknown'))
                 except Exception as inner_err:
-                    print(f"⚠️ Failed to promote {getattr(participant, 'id', 'unknown')}: {inner_err}")
+                    logger.warning("Failed to promote %s: %s", getattr(participant, 'id', 'unknown'), str(inner_err))
         except Exception as outer_err:
-            print(f"❌ Promote all members error: {outer_err}")
+            logger.error("Promote all members error: %s", str(outer_err))
 
     async def disconnect(self):
         """Disconnect the client gracefully"""
         if self.client and self.initialized:
             try:
                 await self.client.disconnect()
-                print("✅ Telethon client disconnected")
+                logger.info("Telethon client disconnected")
             except Exception as e:
-                print(f"⚠️ Error disconnecting client: {e}")
+                logger.warning("Error disconnecting client: %s", str(e))
             finally:
                 self.initialized = False
 
 group_manager = TelegramGroupManager()
+
 # Simple rate limiting
 class RateLimiter:
     def __init__(self, calls_per_second: float = 0.2):
