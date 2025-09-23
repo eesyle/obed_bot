@@ -1,6 +1,7 @@
 import os
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime
+from datetime import datetime
 from typing import Dict, List, Optional, Any
 from aiogram import Bot, Dispatcher, types, Router
 from aiogram.client.session import aiohttp
@@ -123,6 +124,8 @@ COIN_MAPPING = {
         'kraken': 'ZUSD'
     }
 }
+
+router = Router()
 
 
 
@@ -573,8 +576,10 @@ class Config:
         "ETH": [x.strip() for x in os.getenv("ETH_WALLETS", "").split(",") if x.strip()],
     }
     # Add this to your Config class
-    VERIFICATION_GROUP = os.getenv("VERIFICATION_GROUP", "https://t.me/CoinHoldVerify")
+    VERIFICATION_GROUP = os.getenv("VERIFICATION_GROUP", "@CoinHoldVerify")
     VERIFICATION_GROUP_ID = int(os.getenv("VERIFICATION_GROUP_ID", "0"))
+    VOUCH_CHANNEL = os.getenv("VOUCH_CHANNEL", "@CoinHoldVouches")
+    VOUCH_CHANNEL_ID = int(os.getenv("VOUCH_CHANNEL_ID", "0"))
 
     FEE_PERCENTAGE = float(os.getenv("FEE_PERCENTAGE", "1.5"))
     MIN_FEE = float(os.getenv("MIN_FEE", "0.0001"))
@@ -587,7 +592,7 @@ class Config:
         "LTC": float(os.getenv("MIN_LTC", "0.1")),
     }
     SUPPORT_CHAT = os.getenv("SUPPORT_CHAT", "@YourSupportChat")
-    VOUCH_CHANNEL = os.getenv("VOUCH_CHANNEL", "@YourVouchChannel")
+    VOUCH_CHANNEL = os.getenv("VOUCH_CHANNEL", "@CoinHoldVouches")
     BLOCKCHAIN_API = {
         "BTC": "https://blockchain.info/rawtx/{tx_hash}",
         "ETH": "https://api.etherscan.io/api?module=proxy&action=eth_getTransactionByHash&txhash={tx_hash}&apikey={api_key}",
@@ -1618,347 +1623,296 @@ def save_role(chat_id, user_id, role, crypto_address):
 
 
 
- # Command Handlers
-@router.message(Command("buyer"))
-async def cmd_buyer(message: types.Message):
-    try:
-        user_id = message.from_user.id
-        username = message.from_user.username or "Unknown"
-        coin_type = "BTC"  # Example; modify based on your input parsing
-        tx_id = f"tx_{user_id}_{int(time.time())}"
+  # -----------------------
+# /buyer COMMAND - MODERN STYLING
+# -----------------------
 
-        cursor = conn.cursor()
-        # Check if there's a pending seller for this group
-        cursor.execute("SELECT user_id, coin FROM pending_transactions WHERE group_id = ? AND role = 'seller'", (message.chat.id,))
-        pending_seller = cursor.fetchone()
+@dp.message(Command("buyer"))
+async def buyer_command(message: types.Message):
+    if not is_group_only(message):
+        await message.reply("❌ This command can only be used inside the escrow group.")
+        return
 
-        if pending_seller:
-            seller_id, coin = pending_seller
-            seller_username = (await bot.get_chat(seller_id)).username or "Unknown"
-            buyer_id = user_id
-            buyer_username = username
-            coin_type = coin
-            group_id = message.chat.id
+    # Extract address from command
+    parts = message.text.split()
+    if len(parts) < 2:
+        await message.reply(
+            "❌ Please provide your wallet address. Example: /buyer bc1q5qul3hvx0826qdn7lcw9k6ttudhnmuhxj30wu4v32lkmcm2yrgg78cyr7")
+        return
 
-            # Generate escrow address (mock; replace with your logic)
-            escrow_address = f"escrow_{tx_id}_address"
+    address = parts[1]
+    coin_type = detect_coin_type(address)
 
-            # Create transaction summary
-            transaction_summary = (
-                "🎉 <b>TRANSACTION CREATED SUCCESSFULLY</b>\n\n"
-                "┌──────────────────────────────┐\n"
-                "│ 📋 <b>TRANSACTION DETAILS</b>           │\n"
-                "├──────────────────────────────┤\n"
-                f"│ <b>ID:</b> <code>{tx_id}</code> │\n"
-                f"│ <b>Coin:</b> {coin_type}                │\n"
-                "└──────────────────────────────┘\n\n"
-                "👤 <b>BUYER</b>\n"
-                f"• @{buyer_username} (<code>{buyer_id}</code>)\n\n"
-                "🛒 <b>SELLER</b>\n"
-                f"• @{seller_username} (<code>{seller_id}</code>)\n\n"
-                "🏦 <b>ESCROW ADDRESS</b>\n"
-                f"<code>{escrow_address}</code>\n\n"
-                "🔒 <b>SECURITY NOTICE</b>\n"
-                "Always verify the escrow address in the verification group before sending funds.\n\n"
-                "💡 <b>NEXT STEPS</b>\n"
-                "1. Buyer sends funds to escrow address\n"
-                "2. Share transaction hash using /track [hash]\n"
-                "3. Seller fulfills obligations\n"
-                "4. Buyer releases funds with /release\n\n"
-                "⚡ <i>Secure trading with @HoldEscrowBot</i>"
-            )
+    if coin_type == "UNKNOWN":
+        await message.reply("❌ Invalid wallet address format. Please use a valid BTC, ETH, LTC, or USDT-TRC20 address.")
+        return
 
-            await message.answer(transaction_summary, parse_mode="HTML")
-
-            # Save transaction
-            cursor.execute('''
-                INSERT INTO transactions (tx_id, buyer_id, seller_id, coin, escrow_address, group_id, created_at, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (tx_id, buyer_id, seller_id, coin_type, escrow_address, group_id, int(time.time()), "pending"))
-            conn.commit()
-
-            # Verification instruction
-            verification_instruction = (
-                "🔍 <b>VERIFICATION REQUIRED</b>\n\n"
-                f"@{buyer_username}, please verify the escrow address in the verification group before sending funds.\n\n"
-                "After verification, send the agreed amount and use /blockchain [hash] to monitor your transaction."
-            )
-            await message.answer(verification_instruction, parse_mode="HTML")
-
-            # Update group profile picture
-            try:
-                chat = await bot.get_chat(message.chat.id)
-                group_name = chat.title
-                logo_path = await create_group_logo_image(buyer_username, seller_username)
-                if logo_path:
-                    photo = FSInputFile(logo_path)
-                    await bot.set_chat_photo(message.chat.id, photo)
-                    os.remove(logo_path)
-                    logger.info("Updated group profile picture for %s", group_name)
-            except Exception as e:
-                logger.error("Could not update group photo: %s", str(e))
-
-            # Request transaction hash
-            request_hash_msg = (
-                f"👋 @{buyer_username}, please send your transaction hash after payment\n\n"
-                "📋 <b>INSTRUCTIONS:</b>\n"
-                "1. Send exact amount to escrow address\n"
-                "2. Copy transaction hash (TxID) from your wallet\n"
-                "3. Paste it here in this chat\n\n"
-                "🔍 I'll verify it immediately and confirm receipt!"
-            )
-            await message.answer(request_hash_msg, parse_mode="HTML")
-
-            # Remove pending transaction
-            cursor.execute("DELETE FROM pending_transactions WHERE group_id = ? AND role = 'seller'", (group_id,))
-            conn.commit()
-        else:
-            # Store buyer as pending
-            cursor.execute('''
-                INSERT OR REPLACE INTO pending_transactions (tx_id, user_id, role, coin, group_id, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-            ''', (tx_id, user_id, "buyer", coin_type, message.chat.id, int(time.time())))
-            conn.commit()
-            await message.answer(
-                f"@{username}, you are registered as the buyer. Waiting for a seller to join with /seller.",
-                parse_mode="HTML"
-            )
-
-    except Exception as e:
-        logger.error("Error in /buyer command: %s", str(e))
-        await message.answer("❌ Error registering buyer. Please try again later.", parse_mode="HTML")
-
-@router.message(Command("seller"))
-async def cmd_seller(message: types.Message):
-    try:
-        user_id = message.from_user.id
-        username = message.from_user.username or "Unknown"
-        coin_type = "BTC"  # Example; modify based on your input parsing
-        tx_id = f"tx_{user_id}_{int(time.time())}"
-
-        cursor = conn.cursor()
-        # Check if there's a pending buyer for this group
-        cursor.execute("SELECT user_id, coin FROM pending_transactions WHERE group_id = ? AND role = 'buyer'", (message.chat.id,))
-        pending_buyer = cursor.fetchone()
-
-        if pending_buyer:
-            buyer_id, coin = pending_buyer
-            buyer_username = (await bot.get_chat(buyer_id)).username or "Unknown"
-            seller_id = user_id
-            seller_username = username
-            coin_type = coin
-            group_id = message.chat.id
-
-            # Generate escrow address (mock; replace with your logic)
-            escrow_address = f"escrow_{tx_id}_address"
-
-            # Create transaction summary
-            transaction_summary = (
-                "🎉 <b>TRANSACTION CREATED SUCCESSFULLY</b>\n\n"
-                "┌──────────────────────────────┐\n"
-                "│ 📋 <b>TRANSACTION DETAILS</b>           │\n"
-                "├──────────────────────────────┤\n"
-                f"│ <b>ID:</b> <code>{tx_id}</code> │\n"
-                f"│ <b>Coin:</b> {coin_type}                │\n"
-                "└──────────────────────────────┘\n\n"
-                "👤 <b>BUYER</b>\n"
-                f"• @{buyer_username} (<code>{buyer_id}</code>)\n\n"
-                "🛒 <b>SELLER</b>\n"
-                f"• @{seller_username} (<code>{seller_id}</code>)\n\n"
-                "🏦 <b>ESCROW ADDRESS</b>\n"
-                f"<code>{escrow_address}</code>\n\n"
-                "🔒 <b>SECURITY NOTICE</b>\n"
-                "Always verify the escrow address in the verification group before sending funds.\n\n"
-                "💡 <b>NEXT STEPS</b>\n"
-                "1. Buyer sends funds to escrow address\n"
-                "2. Share transaction hash using /track [hash]\n"
-                "3. Seller fulfills obligations\n"
-                "4. Buyer releases funds with /release\n\n"
-                "⚡ <i>Secure trading with @HoldEscrowBot</i>"
-            )
-
-            await message.answer(transaction_summary, parse_mode="HTML")
-
-            # Save transaction
-            cursor.execute('''
-                INSERT INTO transactions (tx_id, buyer_id, seller_id, coin, escrow_address, group_id, created_at, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (tx_id, buyer_id, seller_id, coin_type, escrow_address, group_id, int(time.time()), "pending"))
-            conn.commit()
-
-            # Verification instruction
-            verification_instruction = (
-                "🔍 <b>VERIFICATION REQUIRED</b>\n\n"
-                f"@{buyer_username}, please verify the escrow address in the verification group before sending funds.\n\n"
-                "After verification, send the agreed amount and use /blockchain [hash] to monitor your transaction."
-            )
-            await message.answer(verification_instruction, parse_mode="HTML")
-
-            # Update group profile picture
-            try:
-                chat = await bot.get_chat(message.chat.id)
-                group_name = chat.title
-                logo_path = await create_group_logo_image(buyer_username, seller_username)
-                if logo_path:
-                    photo = FSInputFile(logo_path)
-                    await bot.set_chat_photo(message.chat.id, photo)
-                    os.remove(logo_path)
-                    logger.info("Updated group profile picture for %s", group_name)
-            except Exception as e:
-                logger.error("Could not update group photo: %s", str(e))
-
-            # Request transaction hash
-            request_hash_msg = (
-                f"👋 @{buyer_username}, please send your transaction hash after payment\n\n"
-                "📋 <b>INSTRUCTIONS:</b>\n"
-                "1. Send exact amount to escrow address\n"
-                "2. Copy transaction hash (TxID) from your wallet\n"
-                "3. Paste it here in this chat\n\n"
-                "🔍 I'll verify it immediately and confirm receipt!"
-            )
-            await message.answer(request_hash_msg, parse_mode="HTML")
-
-            # Remove pending transaction
-            cursor.execute("DELETE FROM pending_transactions WHERE group_id = ? AND role = 'buyer'", (group_id,))
-            conn.commit()
-        else:
-            # Store seller as pending
-            cursor.execute('''
-                INSERT OR REPLACE INTO pending_transactions (tx_id, user_id, role, coin, group_id, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-            ''', (tx_id, user_id, "seller", coin_type, message.chat.id, int(time.time())))
-            conn.commit()
-            await message.answer(
-                f"@{username}, you are registered as the seller. Waiting for a buyer to join with /buyer.",
-                parse_mode="HTML"
-            )
-
-    except Exception as e:
-        logger.error("Error in /seller command: %s", str(e))
-        await message.answer("❌ Error registering seller. Please try again later.", parse_mode="HTML")
-
-
-async def create_transaction(chat_id):
-    """Create a transaction when both buyer and seller are registered"""
     conn = sqlite3.connect("escrow_bot.db")
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     
-    try:
-        # Get buyer and seller info
-        cursor.execute('''
-            SELECT user_id, role, crypto_address 
-            FROM group_users 
-            WHERE chat_id = ? AND role IN ('buyer', 'seller')
-        ''', (chat_id,))
+    # Use a transaction to prevent race conditions
+    with conn:
+        # Check if there's already a buyer in this group (by any user)
+        cursor.execute('SELECT user_id FROM group_users WHERE role = "buyer" AND chat_id = ?', (message.chat.id,))
+        existing_buyer = cursor.fetchone()
         
-        users = cursor.fetchall()
-        
-        buyer = None
-        seller = None
-        
-        for user in users:
-            if user['role'] == 'buyer':
-                buyer = user
-            else:
-                seller = user
-        
-        if not buyer or not seller:
-            return  # Should not happen if we have both roles
-        
-        # Check coin type compatibility
-        buyer_coin_type = detect_coin_type(buyer['crypto_address'])
-        seller_coin_type = detect_coin_type(seller['crypto_address'])
-        
-        if buyer_coin_type != seller_coin_type:
-            error_msg = (
-                "❌ <b>Coin Type Mismatch</b>\n\n"
-                f"Buyer is using {buyer_coin_type}, but seller is using {seller_coin_type}.\n"
-                "Both parties must use the same coin type for the transaction.\n\n"
-                "Please update your addresses with the same coin type."
-            )
-            await bot.send_message(chat_id, error_msg, parse_mode="HTML")
-            return
-        
-        # Get user info for display
-        try:
-            buyer_user = await bot.get_chat(buyer['user_id'])
-            buyer_username = buyer_user.username or buyer_user.first_name
-        except:
-            buyer_username = "Unknown"
-
-        try:
-            seller_user = await bot.get_chat(seller['user_id'])
-            seller_username = seller_user.username or seller_user.first_name
-        except:
-            seller_username = "Unknown"
-
-        # Generate transaction ID
-        tx_id = generate_transaction_id()
-
-        # Get escrow wallet address
-        escrow_address = get_escrow_wallet(buyer_coin_type)
-        if not escrow_address:
-            await bot.send_message(chat_id, "❌ Error: No escrow wallet available for this coin type.")
+        if existing_buyer and existing_buyer['user_id'] != message.from_user.id:
+            await message.reply("❌ There is already a buyer for this transaction. Please wait for a seller.")
             return
 
-        # Create modern transaction summary
-        transaction_summary = (
-            "🎉 <b>TRANSACTION INITIATED</b>\n\n"
-            f"<b>Transaction ID:</b> <code>{tx_id}</code>\n\n"
-            "👤 <b>BUYER</b>\n"
-            f"• {buyer_username} (<code>{buyer['user_id']}</code>)\n"
-            f"• Address: <code>{buyer['crypto_address']}</code>\n\n"
-            "🛒 <b>SELLER</b>\n"
-            f"• {seller_username} (<code>{seller['user_id']}</code>)\n"
-            f"• Address: <code>{seller['crypto_address']}</code>\n\n"
-            "────────────────────\n\n"
-            "🏦 <b>ESCROW ADDRESS</b>\n"
-            f"<code>{escrow_address}</code>\n"
-            f"<b>Coin Type:</b> {buyer_coin_type}\n\n"
-            "🔒 <b>SECURITY VERIFICATION</b>\n"
-            "Always verify the escrow address in the verification group before sending funds.\n\n"
-            "💡 <b>NEXT STEPS</b>\n"
-            "1. Buyer sends funds to the escrow address\n"
-            "2. Share transaction hash using /track [hash]\n"
-            "3. Seller fulfills their obligations\n"
-            "4. Buyer releases funds with /release\n\n"
-            "⚡ <i>Secure trading with @HoldEscrowBot</i>"
-        )
+        # Check if user already has a buyer role in this group (allow updating address)
+        cursor.execute('SELECT role FROM group_users WHERE user_id = ? AND chat_id = ?', 
+                       (message.from_user.id, message.chat.id))
+        existing_role = cursor.fetchone()
+        
+        # Allow user to update their buyer address if they're already a buyer
+        # Only prevent if they have a different role (like seller)
+        if existing_role and existing_role['role'] == "seller":
+            await message.reply("❌ You are already registered as a seller in this group. You cannot be both buyer and seller.")
+            return
 
-        # Send the transaction summary
-        await bot.send_message(chat_id, transaction_summary, parse_mode="HTML")
-
-        # Save transaction to database
+        # Save buyer info in group_users
         cursor.execute('''
-            INSERT INTO transactions (tx_id, buyer_id, seller_id, coin, escrow_address, group_id, created_at, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (tx_id, buyer['user_id'], seller['user_id'], buyer_coin_type, escrow_address, chat_id, int(time.time()), "pending"))
+            INSERT OR REPLACE INTO group_users (chat_id, user_id, role, crypto_address, created_at)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (message.chat.id, message.from_user.id, "buyer", address, int(time.time())))
+        
+        # Update user_settings to set role as buyer
+        cursor.execute('''
+            INSERT OR REPLACE INTO user_settings (user_id, role)
+            VALUES (?, ?)
+        ''', (message.from_user.id, "buyer"))
+        
         conn.commit()
 
-        # Update group profile picture
-        try:
-            logo_path = await create_group_logo_image(buyer_username, seller_username)
-            if logo_path:
-                photo = FSInputFile(logo_path)
-                await bot.set_chat_photo(chat_id, photo)
-                os.remove(logo_path)
-        except Exception as e:
-            print(f"Could not update group photo: {e}")
+    # Modern styled response for buyer declaration
+    buyer_response = (
+        "🎯 <b>BUYER REGISTRATION CONFIRMED</b>\n\n"
+        "┌──────────────────────────────┐\n"
+        "│ 👤 <b>USER DETAILS</b>                   │\n"
+        "├──────────────────────────────┤\n"
+        f"│ <b>Name:</b> {message.from_user.first_name} {message.from_user.last_name or ''} │\n"
+        f"│ <b>User ID:</b> <code>{message.from_user.id}</code>        │\n"
+        f"│ <b>Username:</b> @{message.from_user.username or 'N/A'}     │\n"
+        "└──────────────────────────────┘\n\n"
+        "┌──────────────────────────────┐\n"
+        "│ 💰 <b>WALLET INFORMATION</b>             │\n"
+        "├──────────────────────────────┤\n"
+        f"│ <b>Address:</b> <code>{address}</code> │\n"
+        f"│ <b>Coin Type:</b> {coin_type}                │\n"
+        "└──────────────────────────────┘\n\n"
+        "<i>You can update your address before the seller joins.</i>\n\n"
+        "🔒 <i>Secure trading with @HoldEscrowBot</i>"
+    )
 
-        # Send verification instructions
-        verification_msg = (
-            "🔍 <b>VERIFICATION REQUIRED</b>\n\n"
-            f"@{buyer_username}, please verify the escrow address in the verification group before sending funds.\n\n"
-            "After verification, send the agreed amount to the escrow address and use /track [hash] to monitor your transaction."
-        )
-        await bot.send_message(chat_id, verification_msg, parse_mode="HTML")
-        
-    except Exception as e:
-        print(f"Error creating transaction: {e}")
-        await bot.send_message(chat_id, "❌ An error occurred while creating the transaction. Please try again.")
-    finally:
+    # Send buyer declaration
+    await message.reply(buyer_response, parse_mode="HTML")
+
+    # Modern seller instruction message
+    seller_instruction = (
+        "⏳ <b>WAITING FOR SELLER</b>\n\n"
+        "Please wait for a seller to join using:\n"
+        "<code>/seller [wallet_address]</code>\n\n"
+        "📋 <b>REQUIREMENTS:</b>\n"
+        f"• Must use the same coin type: <b>{coin_type}</b>\n\n"
+        "💡 <b>SUPPORTED COINS:</b>\n"
+        "• BTC (Bitcoin)\n"
+        "• LTC (Litecoin)  \n"
+        "• ETH (Ethereum)\n"
+        "• USDT (TRC-20)\n\n"
+        "⚡ <i>Tip: Copy-paste addresses to avoid errors</i>"
+    )
+
+    # Send the seller instruction
+    await message.answer(seller_instruction, parse_mode="HTML")
+
+    # Close connection
+    conn.close()
+
+
+# -----------------------
+# /seller COMMAND - MODERN STYLING
+# -----------------------
+@dp.message(Command("seller"))
+async def seller_command(message: types.Message):
+    user_id = message.from_user.id
+    
+    # Use a single connection for the entire function
+    conn = sqlite3.connect("escrow_bot.db")
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    # Check if a buyer exists in this group
+    cursor.execute('SELECT user_id, crypto_address FROM group_users WHERE role = "buyer" AND chat_id = ?', (message.chat.id,))
+    buyer_row = cursor.fetchone()
+    
+    if not buyer_row:
+        await message.reply("❌ A buyer must register first before a seller can join.")
         conn.close()
+        return
+    
+    buyer_id = buyer_row['user_id']
+    buyer_address = buyer_row['crypto_address']
+    
+    # Check if user is trying to be both buyer and seller
+    if buyer_id == user_id:
+        await message.reply("❌ You cannot be both the buyer and seller in the same transaction.")
+        conn.close()
+        return
+
+    # Extract address from command
+    parts = message.text.split()
+    if len(parts) < 2:
+        await message.reply(
+            "❌ Please provide your wallet address. Example: /seller bc1q5qul3hvx0826qdn7lcw9k6ttudhnmuhxj30wu4v32lkmcm2yrgg78cyr7")
+        conn.close()
+        return
+
+    address = parts[1]
+    coin_type = detect_coin_type(address)
+
+    if coin_type == "UNKNOWN":
+        await message.reply("❌ Invalid wallet address format. Please use a valid BTC, ETH, LTC, or USDT-TRC20 address.")
+        conn.close()
+        return
+
+    # Check coin type compatibility with buyer
+    buyer_coin_type = detect_coin_type(buyer_address)
+    if buyer_coin_type != coin_type:
+        await message.reply(
+            f"❌ Coin type mismatch! Buyer is using {buyer_coin_type}, but you provided a {coin_type} address. Please use a {buyer_coin_type} address.")
+        conn.close()
+        return
+
+    # Save seller info
+    cursor.execute('''
+        INSERT OR REPLACE INTO group_users (chat_id, user_id, role, crypto_address, created_at)
+        VALUES (?, ?, ?, ?, ?)
+    ''', (message.chat.id, user_id, "seller", address, int(time.time())))
+    
+    # Update user_settings to set role as seller
+    cursor.execute('''
+        INSERT OR REPLACE INTO user_settings (user_id, role)
+        VALUES (?, ?)
+    ''', (user_id, "seller"))
+    
+    conn.commit()
+
+    # Modern styled response for seller declaration
+    seller_response = (
+        "🎯 <b>SELLER REGISTRATION CONFIRMED</b>\n\n"
+        "┌──────────────────────────────┐\n"
+        "│ 👤 <b>USER DETAILS</b>                   │\n"
+        "├──────────────────────────────┤\n"
+        f"│ <b>Name:</b> {message.from_user.first_name} {message.from_user.last_name or ''} │\n"
+        f"│ <b>User ID:</b> <code>{message.from_user.id}</code>        │\n"
+        f"│ <b>Username:</b> @{message.from_user.username or 'N/A'}     │\n"
+        "└──────────────────────────────┘\n\n"
+        "┌──────────────────────────────┐\n"
+        "│ 💰 <b>WALLET INFORMATION</b>             │\n"
+        "├──────────────────────────────┤\n"
+        f"│ <b>Address:</b> <code>{address}</code> │\n"
+        f"│ <b>Coin Type:</b> {coin_type}                │\n"
+        "└──────────────────────────────┘\n\n"
+        "<i>Transaction is now being created...</i>\n\n"
+        "🔒 <i>Secure trading with @HoldEscrowBot</i>"
+    )
+
+    # Send seller declaration
+    await message.reply(seller_response, parse_mode="HTML")
+
+    # Get buyer and seller info for display
+    try:
+        buyer_user = await bot.get_chat(buyer_id)
+        buyer_username = buyer_user.username or buyer_user.first_name
+    except:
+        buyer_username = "Unknown"
+
+    seller_username = message.from_user.username or message.from_user.first_name
+
+    # Generate transaction ID
+    tx_id = generate_transaction_id()
+
+    # Get escrow wallet address
+    escrow_address = get_escrow_wallet(coin_type)
+    if not escrow_address:
+        await message.reply("❌ Error: No escrow wallet available for this coin type.")
+        conn.close()
+        return
+
+    # Modern transaction summary
+    transaction_summary = (
+        "🎉 <b>TRANSACTION CREATED SUCCESSFULLY</b>\n\n"
+        "┌──────────────────────────────┐\n"
+        "│ 📋 <b>TRANSACTION DETAILS</b>           │\n"
+        "├──────────────────────────────┤\n"
+        f"│ <b>ID:</b> <code>{tx_id}</code> │\n"
+        f"│ <b>Coin:</b> {coin_type}                │\n"
+        "└──────────────────────────────┘\n\n"
+        "👤 <b>BUYER</b>\n"
+        f"• {buyer_username} (<code>{buyer_id}</code>)\n\n"
+        "🛒 <b>SELLER</b>\n"
+        f"• {seller_username} (<code>{message.from_user.id}</code>)\n\n"
+        "🏦 <b>ESCROW ADDRESS</b>\n"
+        f"<code>{escrow_address}</code>\n\n"
+        "🔒 <b>SECURITY NOTICE</b>\n"
+        "Always verify the escrow address in the verification group before sending funds.\n\n"
+        "💡 <b>NEXT STEPS</b>\n"
+        "1. Buyer sends funds to escrow address\n"
+        "2. Share transaction hash using /track [hash]\n"
+        "3. Seller fulfills obligations\n"
+        "4. Buyer releases funds with /release\n\n"
+        "⚡ <i>Secure trading with @HoldEscrowBot</i>"
+    )
+    
+    # Send the transaction summary
+    await message.answer(transaction_summary, parse_mode="HTML")
+    
+    # Save transaction to database
+    cursor.execute('''
+        INSERT INTO transactions (tx_id, buyer_id, seller_id, coin, escrow_address, group_id, created_at, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (tx_id, buyer_id, user_id, coin_type, escrow_address, message.chat.id, int(time.time()), "pending"))
+    conn.commit()
+    
+    # Verification instruction
+    verification_instruction = (
+        "🔍 <b>VERIFICATION REQUIRED</b>\n\n"
+        f"@{buyer_username}, please verify the escrow address in the verification group before sending funds.\n\n"
+        "After verification, send the agreed amount and use /track [hash] to monitor your transaction."
+    )
+    
+    # Send verification instruction
+    await message.answer(verification_instruction, parse_mode="HTML")
+    
+    # Update the group profile picture
+    try:
+        chat = await bot.get_chat(message.chat.id)
+        group_name = chat.title
+        logo_path = await create_group_logo_image(buyer_username, seller_username)
+        if logo_path:
+            photo = FSInputFile(logo_path)
+            await bot.set_chat_photo(message.chat.id, photo)
+            os.remove(logo_path)
+            print(f"Updated group profile picture for {group_name}")
+    except Exception as e:
+        print(f"Could not update group photo: {e}")
+    
+    # Request transaction hash from buyer
+    request_hash_msg = (
+        f"👋 @{buyer_username}, please send your transaction hash after payment\n\n"
+        "📋 <b>INSTRUCTIONS:</b>\n"
+        "1. Send exact amount to escrow address\n"
+        "2. Copy transaction hash (TxID) from your wallet\n"
+        "3. Paste it here in this chat\n\n"
+        "🔍 I'll verify it immediately and confirm receipt!"
+    )
+
+    await message.answer(request_hash_msg, parse_mode="HTML")
+    
+    # Close connection
+    conn.close()
 
 
   # Enhanced Blockchain API configuration
@@ -3701,8 +3655,8 @@ async def format_conversion_response(amount, from_coin, converted_amount, to_coi
         f"<i>Note: This is an estimated value. Actual rates may vary.</i>"
     )
 
-@dp.message(Command("checkadmin"))
-async def cmd_checkadmin(message: types.Message):
+@dp.message(Command("real"))
+async def cmd_real(message: types.Message):
     # Check if command is used in a group
     if message.chat.type not in ["group", "supergroup"]:
         await message.reply("❌ This command can only be used in group chats.")
@@ -3714,13 +3668,13 @@ async def cmd_checkadmin(message: types.Message):
         admin_usernames = [admin.user.username for admin in admins if admin.user.username]
         
         # Check if any admin is from the official support team
-        official_admins = ["coinHoldsupport", "coinHoldadmin"]  # Add more if needed
+        official_admins = ["coinHoldsupport", "HoldEscrowAdmin"]  # Add more if needed
         has_official_admin = any(admin in official_admins for admin in admin_usernames)
         
         if has_official_admin:
             response = (
                 "✅ <b>Verification Successful!</b>\n\n"
-                "The bot's admin @coinHoldsupport is currently active in this group, "
+                "The bot's admin @HoldEscrowAdmin is currently active in this group, "
                 "which confirms that you are interacting with a legitimate admin.\n\n"
                 "• Proceed only after double-checking all details.\n"
                 "• Release funds only if all terms are met. If instructed by an admin, "
@@ -3732,7 +3686,7 @@ async def cmd_checkadmin(message: types.Message):
                 "⚠️ <b>Admin Verification</b>\n\n"
                 "No official admin was found in this group. Please be cautious and "
                 "verify all details before proceeding with any transaction.\n\n"
-                "Contact @coinxpertsupport if you need assistance."
+                "Contact @HoldEscrowAdmin if you need assistance."
             )
             
         await message.reply(response, parse_mode="HTML")
@@ -3956,6 +3910,17 @@ async def cmd_pay_seller(message: types.Message):
         
         await message.reply(success_message, parse_mode="HTML")
         
+        # Send transaction summary to vouch channel
+        transaction_data = {
+            'tx_id': tx_id,
+            'buyer_id': buyer_id,
+            'seller_id': seller_id,
+            'amount_received': amount,
+            'coin': coin,
+            'status': 'completed'
+        }
+        await send_transaction_to_vouch_channel(transaction_data)
+        
         # Notify seller
         try:
             seller_notification = (
@@ -3973,6 +3938,77 @@ async def cmd_pay_seller(message: types.Message):
         await message.reply("❌ An error occurred while processing your request.")
     finally:
         conn.close()
+
+async def send_transaction_to_vouch_channel(transaction_data: dict):
+    """Send transaction summary to the vouch channel"""
+    try:
+        tx_id = transaction_data['tx_id']
+        buyer_id = transaction_data['buyer_id']
+        seller_id = transaction_data['seller_id']
+        amount = transaction_data['amount_received']
+        coin_type = transaction_data['coin']
+        status = transaction_data['status']
+        
+        # Get user information
+        try:
+            buyer = await bot.get_chat(buyer_id)
+            buyer_username = f"@{buyer.username}" if buyer.username else buyer.first_name
+        except:
+            buyer_username = "Unknown"
+            
+        try:
+            seller = await bot.get_chat(seller_id)
+            seller_username = f"@{seller.username}" if seller.username else seller.first_name
+        except:
+            seller_username = "Unknown"
+        
+        # Format amount based on coin type
+        if coin_type in ["BTC", "LTC"]:
+            amount_str = f"{amount:.8f}"
+        elif coin_type == "ETH":
+            amount_str = f"{amount:.6f}"
+        else:
+            amount_str = f"{amount:.2f}"
+        
+        # Create beautiful transaction summary for the channel
+        vouch_message = (
+            "🎉 <b>SUCCESSFUL TRANSACTION COMPLETED</b> 🎉\n\n"
+            "┌──────────────────────────────┐\n"
+            "│ 📋 <b>TRANSACTION DETAILS</b>           │\n"
+            "├──────────────────────────────┤\n"
+            f"│ <b>ID:</b> <code>{tx_id}</code> │\n"
+            f"│ <b>Amount:</b> {amount_str} {coin_type}        │\n"
+            f"│ <b>Status:</b> {status.capitalize()}           │\n"
+            "└──────────────────────────────┘\n\n"
+            "👤 <b>BUYER</b>\n"
+            f"• {buyer_username} (<code>{buyer_id}</code>)\n\n"
+            "🛒 <b>SELLER</b>\n"
+            f"• {seller_username} (<code>{seller_id}</code>)\n\n"
+            "⏰ <b>COMPLETED AT</b>\n"
+            f"• {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "💫 <i>Another successful trade secured by</i> <b>@HoldEscrowBot</b> 💫\n\n"
+            "⭐ <b>Leave feedback for your trading partner!</b>"
+        )
+        
+        # Send to vouch channel
+        if Config.VOUCH_CHANNEL_ID:
+            await bot.send_message(
+                chat_id=Config.VOUCH_CHANNEL_ID,
+                text=vouch_message,
+                parse_mode="HTML"
+            )
+        else:
+            await bot.send_message(
+                chat_id=Config.VOUCH_CHANNEL,
+                text=vouch_message,
+                parse_mode="HTML"
+            )
+            
+        print(f"✅ Transaction {tx_id} summary sent to vouch channel")
+        
+    except Exception as e:
+        print(f"❌ Error sending transaction to vouch channel: {e}")
 
 
 # ========================
@@ -4042,6 +4078,17 @@ async def cmd_refund_buyer(message: types.Message):
         )
         
         await message.reply(success_message, parse_mode="HTML")
+        
+        # Send transaction summary to vouch channel (with refund status)
+        transaction_data = {
+            'tx_id': tx_id,
+            'buyer_id': buyer_id,
+            'seller_id': seller_id,
+            'amount_received': amount,
+            'coin': coin,
+            'status': 'refunded'
+        }
+        await send_transaction_to_vouch_channel(transaction_data)
         
         # Notify buyer
         try:
