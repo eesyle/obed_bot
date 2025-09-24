@@ -2618,7 +2618,7 @@ async def balance_command(message: types.Message):
     cursor = conn.cursor()
 
     cursor.execute('''
-        SELECT amount_received, coin, escrow_address, payment_tx_hash 
+        SELECT amount_received, coin, escrow_address, tx_hash 
         FROM transactions 
         WHERE (buyer_id = ? OR seller_id = ?) 
         ORDER BY created_at DESC LIMIT 1
