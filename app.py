@@ -157,7 +157,7 @@ def init_db():
         seller_id INTEGER,
         amount REAL,
         coin TEXT,
-        amount_received ,
+        amount_received REAL,
         wallet TEXT,
         fee REAL,
         status TEXT,
@@ -566,7 +566,7 @@ deposit_monitor = DepositMonitor()
 
 class Config:
     ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x]
-    VERIFICATION_GROUP_PREFIX = "coinHold Verification"
+    VERIFICATION_GROUP_PREFIX = "HoldEscrowBot Verification"
     MAX_VERIFICATION_GROUPS = 5  # Maximum verification groups per user
     # Load wallet addresses from environment variables
     WALLETS = {
@@ -731,7 +731,7 @@ class TelegramGroupManager:
                     return {"success": False, "error": "Telethon client not initialized"}
 
             group_id = f"escrow_{creator_id}_{int(time.time())}"
-            group_name = f"CoinHold Escrow #{group_id[-6:].upper()}"
+            group_name = f"@HoldEscrow #{group_id[-6:].upper()}"
             logger.info("Creating group: %s", group_name)
 
             # Create the supergroup
@@ -1110,7 +1110,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
     # Welcome message with clickable links
     welcome_msg = await translate(
         "🏆 Welcome @{username}! 🏆\n\n"
-        "💠 <b>CoinHold Escrow</b> – Your trusted escrow service for secure and hassle-free Telegram transactions.\n"
+        "💠 <b>@HoldEscrow</b> – Your trusted escrow service for secure and hassle-free Telegram transactions.\n"
         "Keep your funds safe and trade with confidence!\n\n"
         "💵 <b>ESCROW FEE</b>\n"
         "• $5.0 if under $100\n"
@@ -1149,6 +1149,22 @@ async def cmd_start(message: types.Message, state: FSMContext):
                 reply_markup=keyboard,
                 parse_mode="HTML"
             )
+            
+            # Send follow-up message guiding users to create escrow group
+            followup_msg = await translate(
+                "🚀 <b>Ready to start your secure transaction?</b>\n\n"
+                "👆 Click the <b>🛡️ CREATE ESCROW GROUP</b> button above\n"
+                "OR\n"
+                "💬 Type <b>/create</b> to get started!\n\n"
+                "Both options will help you create a secure escrow group for your transaction. 🔒",
+                lang
+            )
+            
+            await bot.send_message(
+                message.chat.id,
+                followup_msg,
+                parse_mode="HTML"
+            )
             return
     except Exception as e:
         print(f"Could not send image: {e}")
@@ -1158,6 +1174,96 @@ async def cmd_start(message: types.Message, state: FSMContext):
         message.chat.id,
         welcome_msg,
         reply_markup=keyboard,
+        parse_mode="HTML"
+    )
+    
+    # Send follow-up message guiding users to create escrow group
+    followup_msg = await translate(
+        "🚀 <b>Ready to start your secure transaction?</b>\n\n"
+        "👆 Click the <b>🛡️ CREATE ESCROW GROUP</b> button above\n"
+        "OR\n"
+        "💬 Type <b>/create</b> to get started!\n\n"
+        "Both options will help you create a secure escrow group for your transaction. 🔒",
+        lang
+    )
+    
+    await bot.send_message(
+        message.chat.id,
+        followup_msg,
+        parse_mode="HTML"
+    )
+
+# New /create command - only works in private chats (not groups)
+@dp.message(Command("create"))
+async def cmd_create(message: types.Message, state: FSMContext):
+    """
+    Handle /create command - creates escrow group (private chats only)
+    This command does the same as the "CREATE ESCROW GROUP" button
+    """
+    lang = get_user_language(message.from_user.id)
+    
+    # Check if command is used in a group
+    if message.chat.type != "private":
+        error_msg = await translate(
+            "❌ <b>The /create command can only be used in private chat with the bot.</b>\n\n"
+            "Please start a private conversation with me and use /create there, "
+            "or use the 🛡️ CREATE ESCROW GROUP button in the group.",
+            lang
+        )
+        await bot.send_message(
+            message.chat.id,
+            error_msg,
+            parse_mode="HTML"
+        )
+        return
+    
+    # Check if user has reached group limit
+    cursor = escrow_db.conn.cursor()
+    cursor.execute('SELECT COUNT(*) FROM escrow_groups WHERE creator_id = ?', (message.from_user.id,))
+    group_count = cursor.fetchone()[0]
+
+    if group_count >= 10:  # Limit to 10 groups per user
+        # Get user's active groups
+        cursor.execute('SELECT chat_id, invite_link FROM escrow_groups WHERE creator_id = ?',
+                       (message.from_user.id,))
+        groups = cursor.fetchall()
+
+        groups_msg = await translate(
+            "❌ <b>You have reached the maximum number of groups you can create!</b>\n\n"
+            "Use one of your existing groups or contact an admin for assistance.\n\n"
+            "<b>Active Groups Created by you:</b>\n",
+            lang
+        )
+
+        for group in groups:
+            groups_msg += f"\n• {group['chat_id']}: {group['invite_link']}"
+
+        await bot.send_message(
+            message.from_user.id,
+            groups_msg,
+            parse_mode="HTML"
+        )
+        return
+
+    # Show group creation options (same as the button)
+    options_msg = await translate(
+        "🛡️ <b>Create Your Escrow Group</b>\n\n"
+        "Choose one of these options:\n\n"
+        "🔹 <b>With Admin</b> - Creates a group with admins for a secure escrow\n"
+        "🔹 <b>Bot Only</b> - Creates a group with only the bot, ideal for privacy-focused users",
+        lang
+    )
+
+    options_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👥 WITH ADMINS", callback_data="create_with_admins")],
+        [InlineKeyboardButton(text="🤖 ONLY BOT", callback_data="create_bot_only")],
+        [InlineKeyboardButton(text="🔙 Back to Main", callback_data="back:main_menu")]
+    ])
+
+    await bot.send_message(
+        message.from_user.id,
+        options_msg,
+        reply_markup=options_keyboard,
         parse_mode="HTML"
     )
 
@@ -1629,7 +1735,16 @@ def save_role(chat_id, user_id, role, crypto_address):
 
 @dp.message(Command("buyer"))
 async def buyer_command(message: types.Message):
+    # Debug logging
+    logger.info(f"🔍 BUYER COMMAND DEBUG:")
+    logger.info(f"  - Chat ID: {message.chat.id}")
+    logger.info(f"  - Chat Type: {message.chat.type}")
+    logger.info(f"  - User ID: {message.from_user.id}")
+    logger.info(f"  - Message Text: {message.text}")
+    logger.info(f"  - Is Group Check: {is_group_only(message)}")
+    
     if not is_group_only(message):
+        logger.warning(f"❌ Buyer command rejected - not in group. Chat type: {message.chat.type}")
         await message.reply("❌ This command can only be used inside the escrow group.")
         return
 
@@ -1736,6 +1851,14 @@ async def buyer_command(message: types.Message):
 # -----------------------
 @dp.message(Command("seller"))
 async def seller_command(message: types.Message):
+    # Debug logging
+    logger.info(f"🔍 SELLER COMMAND DEBUG:")
+    logger.info(f"  - Chat ID: {message.chat.id}")
+    logger.info(f"  - Chat Type: {message.chat.type}")
+    logger.info(f"  - User ID: {message.from_user.id}")
+    logger.info(f"  - Message Text: {message.text}")
+    logger.info(f"  - Is Group Check: {is_group_only(message)}")
+    
     user_id = message.from_user.id
     
     # Use a single connection for the entire function
@@ -2582,7 +2705,7 @@ async def create_group_logo_image(buyer_username: str, seller_username: str) -> 
             username_font = ImageFont.load_default()
 
         # Draw title
-        title = "Escrow by CoinHoldtBot"
+        title = "Escrow by @HoldEscrowBot"
         title_bbox = draw.textbbox((0, 0), title, font=title_font)
         title_width = title_bbox[2] - title_bbox[0]
         draw.text(((width - title_width) // 2, 50), title, fill=(255, 255, 255), font=title_font)
@@ -2826,7 +2949,7 @@ async def create_group_profile_image(group_name: str, buyer_username: str, selle
             text_font = ImageFont.load_default()
 
         # Draw title
-        draw.text((width // 2, 50), "CoinHold Escrow", fill=(255, 255, 255), font=title_font, anchor="mm")
+        draw.text((width // 2, 50), "@HoldEscrowBot", fill=(255, 255, 255), font=title_font, anchor="mm")
 
         # Draw group name
         wrapped_name = textwrap.fill(group_name, width=30)
@@ -2961,10 +3084,15 @@ def is_escrow_address(address: str) -> bool:
 
 # Add this function to get transaction by escrow address
 def get_transaction_by_escrow_address(escrow_address: str):
+    """
+    Get the most recent transaction for a given escrow address.
+    Returns the transaction with the latest created_at timestamp.
+    """
     conn = sqlite3.connect('escrow_bot.db')
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
-    cursor.execute('SELECT * FROM transactions WHERE escrow_address = ?', (escrow_address,))
+    # Order by created_at DESC to get the most recent transaction first
+    cursor.execute('SELECT * FROM transactions WHERE escrow_address = ? ORDER BY created_at DESC', (escrow_address,))
     result = cursor.fetchone()
     conn.close()
     return result
@@ -3020,10 +3148,10 @@ async def verify_command_anywhere(message: types.Message):
         f"**Transaction ID:** {transaction['tx_id']}\n"
         f"**Buyer:** {buyer_name} (@{buyer_username}, ID: {transaction['buyer_id']})\n"
         f"**Seller:** {seller_name} (@{seller_username}, ID: {transaction['seller_id']})\n\n"
-        "This address has been verified as a legitimate coinHold escrow address.\n\n"
+        "This address has been verified as a legitimate HoldEscrowBot address.\n\n"
         "**Valid Escrow Address:** This is the official escrow address for your transaction.\n"
         "As the buyer, you may securely send funds to this address.\n\n"
-        "Generated by @@HoldEscrowBot."
+        "Generated by @HoldEscrowBot."
     )
 
     await message.reply(verification_text, parse_mode="Markdown")
@@ -3074,7 +3202,7 @@ async def handle_pasted_address_anywhere(message: types.Message):
         ])
 
         await message.reply(
-            "🔍 This looks like a coinHold escrow address. Would you like to verify it?",
+            "🔍 This looks like a HoldEscrowBot address. Would you like to verify it?",
             reply_markup=keyboard
         )
 
@@ -3222,13 +3350,13 @@ async def cmd_instructions(message: types.Message):
         "💭 <b>INSTRUCTIONS</b>\n"
         "To protect yourself from scams, please follow these guides:\n\n"
         "<b>Tutorials & Safety Tips:</b>\n"
-        "⚠️ <a href='https://t.me/CoinHoldEscrow/14'>Click here</a>\n"
+        "⚠️ <a href='https://t.me/HoldEscrowBot/14'>Click here</a>\n"
         " ⤷ Reading is mandatory\n\n"
         "<b>Buyer's Safety Guide:</b>\n"
-        "⚠️ <a href='https://t.me/CoinHoldEscrow/18'>Click here</a>\n"
+        "⚠️ <a href='https://t.me/HoldEscrowBot/18'>Click here</a>\n"
         " ⤷ Reading is mandatory\n\n"
         "<b>Seller's Safety Guide:</b>\n"
-        "⚠️ <a href='https://t.me/CoinHoldEscrow/20'>Click here</a>\n"
+        "⚠️ <a href='https://t.me/HoldEscrowBot/20'>Click here</a>\n"
         " ⤷ Reading is mandatory",
         lang
     )
@@ -3448,7 +3576,7 @@ async def cmd_support(message: types.Message):
         "• Need help with your escrow transaction?\n"
         "  Our dedicated support team is here to assist you every step of the way.\n\n"
         "• <b>Contact Us:</b>\n"
-        "  @CoinHoldSupport @CoinHoldAdmin\n\n"
+        "  @HoldEscrowSupport @HoldEscrowAdmin\n\n"
         "• To invite an admin to the escrow group, simply send /dispute.\n\n"
         "---\n\n"
         "<i>Available 24/7 to ensure a seamless transaction experience.</i>\n"
@@ -3668,7 +3796,7 @@ async def cmd_real(message: types.Message):
         admin_usernames = [admin.user.username for admin in admins if admin.user.username]
         
         # Check if any admin is from the official support team
-        official_admins = ["coinHoldsupport", "HoldEscrowAdmin"]  # Add more if needed
+        official_admins = ["HoldEscrowAdmin", "HoldEscrowAdmin"]  # Add more if needed
         has_official_admin = any(admin in official_admins for admin in admin_usernames)
         
         if has_official_admin:
@@ -3905,7 +4033,7 @@ async def cmd_pay_seller(message: types.Message):
             f"<b>Amount:</b> {amount_formatted} {coin}\n"
             f"<b>Released by:</b> @{message.from_user.username or message.from_user.first_name}\n\n"
             "The seller has received the funds and the transaction is now complete.\n\n"
-            "Thank you for using CoinHold Escrow! 🚀"
+            "Thank you for using HoldEscrowBot! 🚀"
         )
         
         await message.reply(success_message, parse_mode="HTML")
@@ -3927,7 +4055,7 @@ async def cmd_pay_seller(message: types.Message):
                 "💰 <b>FUNDS RELEASED</b>\n\n"
                 f"The buyer has released {amount_formatted} {coin} to you.\n"
                 f"<b>Transaction ID:</b> {tx_id}\n\n"
-                "The transaction is now complete. Thank you for using CoinHold Escrow! 🚀"
+                "The transaction is now complete. Thank you for using HoldEscrowAdmin! 🚀"
             )
             await bot.send_message(seller_id, seller_notification, parse_mode="HTML")
         except Exception as e:
@@ -4074,7 +4202,7 @@ async def cmd_refund_buyer(message: types.Message):
             f"<b>Amount:</b> {amount_formatted} {coin}\n"
             f"<b>Refunded by:</b> @{message.from_user.username or message.from_user.first_name}\n\n"
             "The buyer has received a refund and the transaction is now closed.\n\n"
-            "Thank you for using CoinHold Escrow! 🚀"
+            "Thank you for using HoldEscrowBot! 🚀"
         )
         
         await message.reply(success_message, parse_mode="HTML")
@@ -4096,7 +4224,7 @@ async def cmd_refund_buyer(message: types.Message):
                 "💰 <b>REFUND PROCESSED</b>\n\n"
                 f"You have received a refund of {amount_formatted} {coin}.\n"
                 f"<b>Transaction ID:</b> {tx_id}\n\n"
-                "The transaction is now closed. Thank you for using CoinHold Escrow! 🚀"
+                "The transaction is now closed. Thank you for using @HoldEscrowBot! 🚀"
             )
             await bot.send_message(buyer_id, buyer_notification, parse_mode="HTML")
         except Exception as e:
@@ -4342,7 +4470,7 @@ async def cmd_referral(message: types.Message):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(
             text="📤 Share Referral Link", 
-            url=f"https://t.me/share/url?url=https://t.me/{BOT_USERNAME}?start={referral_code}&text=Join%20me%20on%20CoinHold%20Escrow%20for%20secure%20crypto%20transactions!"
+            url=f"https://t.me/share/url?url=https://t.me/{BOT_USERNAME}?start={referral_code}&text=Join%20me%20on%20@HoldEscrowBot%20Escrow%20for%20secure%20crypto%20transactions!"
         )],
         [InlineKeyboardButton(
             text="📊 Referral Leaderboard", 
@@ -4473,6 +4601,24 @@ async def on_startup(dp):
     await group_manager.initialize()
       # Start deposit monitoring
     asyncio.create_task(deposit_monitor.start_monitoring())
+
+    # Set bot description (persistent static message)
+    try:
+        # Attempt to set bot description and notify admins
+        bot_description = (
+            "🤖 HoldEscrowBot\n\n"
+            "🟢 CHAT @CoinHoldVerify\n"
+            "📢 UPDATES @CoinHoldEscrow\n"
+            "⭐ VOUCHES @CoinHoldVouches\n\n"
+            "💵 5$ Flat Fee For Transaction Under 100$\n"
+            "📊 5% Fee For Transaction Over 100$"
+        )
+        
+        await bot.set_my_description(description=bot_description)
+        print("✅ Bot description set successfully")
+    except Exception as e:
+        print(f"❌ Error setting bot description: {e}")
+
 
     for admin_id in Config.ADMIN_IDS:
         try:
