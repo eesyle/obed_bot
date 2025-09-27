@@ -1983,9 +1983,9 @@ async def seller_command(message: types.Message):
         "Always verify the escrow address in the verification group before sending funds.\n\n"
         "💡 <b>NEXT STEPS</b>\n"
         "1. Buyer sends funds to escrow address\n"
-        "2. Share transaction hash using /track [hash]\n"
+        "2. Share transaction hash using /blockchain [hash]\n"
         "3. Seller fulfills obligations\n"
-        "4. Buyer releases funds with /release\n\n"
+        "4. Buyer releases funds with /pay_seller\n\n"
         "⚡ <i>Secure trading with @HoldEscrowBot</i>"
     )
     
@@ -2003,7 +2003,7 @@ async def seller_command(message: types.Message):
     verification_instruction = (
         "🔍 <b>VERIFICATION REQUIRED</b>\n\n"
         f"@{buyer_username}, please verify the escrow address in the verification group before sending funds.\n\n"
-        "After verification, send the agreed amount and use /track [hash] to monitor your transaction."
+        "After verification, send the agreed amount and use /blockchain [hash] to monitor your transaction."
     )
     
     # Send verification instruction
@@ -2707,7 +2707,7 @@ async def balance_command(message: types.Message):
         
         balance_msg += "━━━━━━━━━━━━━━━━━━━━━\n"
         balance_msg += "✅ Funds are securely held in escrow\n"
-        balance_msg += "📋 Use /release to complete transaction\n"
+        balance_msg += "📋 Use /pay_seller to complete transaction\n"
         balance_msg += "🔄 Use /refund to cancel transaction\n"
         balance_msg += "📊 Use /status for detailed transaction info"
 
@@ -2761,7 +2761,7 @@ async def handle_transaction_hash(message: types.Message):
     # Check if message might be a transaction hash
     possible_hash = message.text.strip()
     if len(possible_hash) >= 64:  # Most hashes are 64+ chars
-        await verify_transaction_hash(message)
+        await admin_verify_transaction(message, possible_hash)
 
 
 # Create a function to generate the group logo image
@@ -3120,7 +3120,7 @@ async def generate_escrow_address(chat_id: int):
         f"### IMPORTANT: AVOID SCAMS!\n\n"
         f"- Always verify the escrow address by sending it to the Verification Group before sending funds.\n"
         f"- COMMANDS:\n"
-        f"  /pay_seller - Release funds to seller.\n"
+        f"  /pay_seller - Release payment to seller.\n"
         f"  /refund_buyer - Return funds to buyer.\n"
         f"- Multiple payments accepted to same address.\n"
         f"- DESCRIPTION\n\n"
@@ -3409,7 +3409,7 @@ async def cmd_terms(message: types.Message):
         "• Keep credentials secure and report suspicious activity\n"
         "• No refunds for user mistakes or poor due diligence\n"
         "• You're responsible for verifying counterparties\n"
-        "• Funds can't be recovered once released — double-check everything\n\n"
+        "• Funds can't be recovered once paid to the seller — double-check everything\n\n"
         "By using @@HoldEscrowBot, you accept these terms and take full responsibility for your transactions. 🚀",
         lang
     )
@@ -3430,13 +3430,13 @@ async def cmd_instructions(message: types.Message):
         "💭 <b>INSTRUCTIONS</b>\n"
         "To protect yourself from scams, please follow these guides:\n\n"
         "<b>Tutorials & Safety Tips:</b>\n"
-        "⚠️ <a href='https://t.me/HoldEscrowBot/14'>Click here</a>\n"
+        "⚠️ <a href='https://t.me/CoinHoldEscrow/16'>Click here</a>\n"
         " ⤷ Reading is mandatory\n\n"
         "<b>Buyer's Safety Guide:</b>\n"
-        "⚠️ <a href='https://t.me/HoldEscrowBot/18'>Click here</a>\n"
+        "⚠️ <a href='https://t.me/CoinHoldEscrow/18'>Click here</a>\n"
         " ⤷ Reading is mandatory\n\n"
         "<b>Seller's Safety Guide:</b>\n"
-        "⚠️ <a href='https://t.me/HoldEscrowBot/20'>Click here</a>\n"
+        "⚠️ <a href='https://t.me/CoinHoldEscrow/20'>Click here</a>\n"
         " ⤷ Reading is mandatory",
         lang
     )
@@ -3509,7 +3509,7 @@ async def verify_tx_command(message: types.Message):
         return
     
     tx_hash = parts[1]
-    await verify_transaction_hash(message, tx_hash)
+    await admin_verify_transaction(message, tx_hash)
 
 @dp.message(Command("admin_verify"))
 async def admin_verify_command(message: types.Message):
