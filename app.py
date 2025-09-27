@@ -1078,7 +1078,7 @@ async def cmd_create(message: types.Message, state: FSMContext):
     cursor.execute('SELECT COUNT(*) FROM escrow_groups WHERE creator_id = ?', (message.from_user.id,))
     group_count = cursor.fetchone()[0]
 
-    if group_count >= 10:  # Limit to 10 groups per user
+    if group_count >= 15:  # Limit to 15 groups per user
         # Get user's active groups
         cursor.execute('SELECT chat_id, invite_link FROM escrow_groups WHERE creator_id = ?',
                        (message.from_user.id,))
