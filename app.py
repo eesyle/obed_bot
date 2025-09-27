@@ -4,19 +4,14 @@ from datetime import datetime
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 from aiogram import Bot, Dispatcher, types, Router
-from telethon.errors import SessionPasswordNeededError, AuthKeyError
 from aiogram.client.session import aiohttp
 from aiogram.fsm.storage.memory import MemoryStorage
-from telethon.sessions import StringSession
-from telethon.errors import SessionPasswordNeededError, AuthKeyError, ApiIdInvalidError
 from aiogram.filters import Command
 from dotenv import load_dotenv
 import sqlite3
 import random
 import textwrap
 import re
-import base64
-import binascii
 from PIL import Image, ImageDraw, ImageFont
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from deep_translator import GoogleTranslator
@@ -47,9 +42,6 @@ from telethon.errors import SessionPasswordNeededError, FloodWaitError, RPCError
 # Configure logging for detailed debugging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-
-
-
 # Load environment variables
 load_dotenv()
 
@@ -61,7 +53,7 @@ dp = Dispatcher(storage=storage)
 # Telethon credentials
 TELEGRAM_API_ID = int(os.getenv("TELEGRAM_API_ID", "0"))
 TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH", "")
-# TELEGRAM_SESSION removed - now using string sessions
+TELEGRAM_SESSION = os.getenv("TELEGRAM_SESSION", "escrow_bot")
 BOT_USERNAME = os.getenv("BOT_USERNAME")
 # Connect to SQLite DB
 DB_PATH = os.path.join(os.path.dirname(__file__), "escrow_bot.db")
@@ -577,15 +569,6 @@ class Config:
     VERIFICATION_GROUP_PREFIX = "HoldEscrowBot Verification"
     MAX_VERIFICATION_GROUPS = 5  # Maximum verification groups per user
     # Load wallet addresses from environment variables
-    # Telegram Bot
-    BOT_TOKEN = os.getenv("BOT_TOKEN")
-     
-    BOT_USERNAME = os.getenv("BOT_USERNAME", "HoldEscrowBot")
-    
-    # Telethon (for group creation)
-    TELEGRAM_API_ID = os.getenv("TELEGRAM_API_ID")
-    TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH")
-    TELETHON_SESSION_STRING = os.getenv("TELETHON_SESSION_STRING")
     WALLETS = {
         "USDT": [x.strip() for x in os.getenv("USDT_WALLETS", "").split(",") if x.strip()],
         "BTC": [x.strip() for x in os.getenv("BTC_WALLETS", "").split(",") if x.strip()],
@@ -668,38 +651,6 @@ def generate_referral_code() -> str:
     chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
     return ''.join(random.choice(chars) for _ in range(Config.REFERRAL_CODE_LENGTH))
 
-def decode_render_session_string(encoded_string):
-    """
-    Decode a Render-safe encoded session string back to original format.
-    
-    Args:
-        encoded_string (str): Hex-encoded session string from Render environment
-        
-    Returns:
-        str: Original session string or None if decoding fails
-    """
-    try:
-        # Check if it's already a regular session string (contains special chars)
-        if any(char in encoded_string for char in ['-', '_', '+', '/', '=']):
-            logger.info("Session string appears to be in regular format, using as-is")
-            return encoded_string
-            
-        # Try to decode from hex format
-        logger.info("Attempting to decode hex-encoded session string")
-        hex_bytes = binascii.unhexlify(encoded_string)
-        b64_decoded = base64.b64decode(hex_bytes)
-        original_string = b64_decoded.decode('utf-8')
-        logger.info("Successfully decoded session string from Render format")
-        return original_string
-        
-    except (binascii.Error, base64.binascii.Error, UnicodeDecodeError) as e:
-        logger.warning(f"Failed to decode session string: {e}")
-        logger.info("Treating as regular session string")
-        return encoded_string
-    except Exception as e:
-        logger.error(f"Unexpected error decoding session string: {e}")
-        return None
-
 # ========================
 # DATABASE CLASSES
 # ========================
@@ -709,130 +660,107 @@ class TelegramGroupManager:
     def __init__(self):
         self.client = None
         self.initialized = False
-        self.session_string = None
-        self.last_error = None
-        
-    async def initialize(self):
-        """Initialize Telethon client with robust error handling"""
-        try:
-            # Get credentials from environment
-            api_id = os.getenv("TELEGRAM_API_ID")
-            api_hash = os.getenv("TELEGRAM_API_HASH")
-            session_string = os.getenv("TELETHON_SESSION_STRING")
-            
-            if not all([api_id, api_hash, session_string]):
-                self.last_error = "Missing Telethon credentials in environment variables"
-                logger.error(self.last_error)
-                return False
-            
-            # Clean and validate session string
-            session_string = session_string.strip()
-            if len(session_string) < 200:
-                self.last_error = f"Session string too short ({len(session_string)} chars), expected 200+"
-                logger.error(self.last_error)
-                return False
-            
-            logger.info(f"Attempting to initialize Telethon with session string ({len(session_string)} chars)")
-            
-            # Create StringSession
-            try:
-                session = StringSession(session_string)
-            except Exception as e:
-                self.last_error = f"Invalid session string format: {e}"
-                logger.error(self.last_error)
-                return False
-            
-            # Create client
-            self.client = TelegramClient(
-                session=session,
-                api_id=int(api_id),
-                api_hash=api_hash
+        self.conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS escrow_groups (
+                group_id TEXT PRIMARY KEY,
+                chat_id INTEGER,
+                buyer_id INTEGER,
+                seller_id INTEGER,
+                creator_id INTEGER,
+                invite_link TEXT,
+                created_at INTEGER,
+                with_admins INTEGER
             )
-            
-            # Set longer timeouts for cloud environments
-            self.client.session.set_dc(2, '149.154.167.40', 443)
-            
-            # Connect with timeout
-            await asyncio.wait_for(self.client.connect(), timeout=10)
-            
-            if not await self.client.is_user_authorized():
-                self.last_error = "Session not authorized. Please generate a new session string."
-                logger.error(self.last_error)
-                await self.client.disconnect()
-                return False
-            
-            # Test connection
-            me = await self.client.get_me()
-            logger.info(f"✅ Telethon initialized successfully for user: {me.first_name} (@{me.username})")
-            
-            self.initialized = True
-            self.last_error = None
-            return True
-            
-        except ApiIdInvalidError as e:
-            self.last_error = f"Invalid API ID/Hash: {e}"
-            logger.error(self.last_error)
-            return False
-        except AuthKeyError as e:
-            self.last_error = f"Auth key error: {e}. Generate new session string."
-            logger.error(self.last_error)
-            return False
-        except SessionPasswordNeededError:
-            self.last_error = "2FA password required. Use interactive session generation."
-            logger.error(self.last_error)
-            return False
-        except asyncio.TimeoutError:
-            self.last_error = "Connection timeout. Check network connectivity."
-            logger.error(self.last_error)
-            return False
-        except Exception as e:
-            self.last_error = f"Unexpected error during initialization: {e}"
-            logger.error(self.last_error)
-            return False
-    
-    async def create_escrow_group(self, creator_id, creator_name, with_admins=True):
-        """Create escrow group with comprehensive error handling"""
-        if not self.initialized:
-            init_result = await self.initialize()
-            if not init_result:
-                return {
-                    "success": False, 
-                    "error": f"Telethon not initialized: {self.last_error}",
-                    "fallback_instructions": self._get_fallback_instructions()
-                }
-        
+        ''')
+        self.conn.commit()
+
+    async def initialize(self):
+        """Initialize the Telethon client with retries and detailed logging"""
         try:
-            logger.info(f"Creating escrow group for user {creator_id} ({creator_name})")
-            
-            # Generate unique group name
-            timestamp = int(time.time())
-            group_id = f"escrow_{creator_id}_{timestamp}"
-            group_name = f"HoldEscrow Escrow #{str(timestamp)[-6:]}"
-            
-            # Create supergroup
+            if not all([TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_SESSION]):
+                logger.error("Missing Telegram API credentials: API_ID=%s, API_HASH=%s, SESSION=%s",
+                            TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_SESSION)
+                return False
+
+            self.client = TelegramClient(
+                TELEGRAM_SESSION,
+                TELEGRAM_API_ID,
+                TELEGRAM_API_HASH,
+                connection_retries=5,
+                retry_delay=3,
+                auto_reconnect=True,
+                timeout=30  # Increased timeout
+            )
+
+            for attempt in range(5):
+                try:
+                    logger.info("Attempting to connect Telethon client (attempt %d)", attempt + 1)
+                    await self.client.connect()
+                    if not await self.client.is_user_authorized():
+                        logger.error("Session not authorized. Ensure escrow_bot.session is valid.")
+                        return False
+                    self.initialized = True
+                    logger.info("Telethon client initialized successfully")
+                    return True
+                except RPCError as e:
+                    logger.warning("Connection attempt %d failed: %s", attempt + 1, str(e))
+                    if attempt < 4:
+                        await asyncio.sleep(3)
+                    continue
+                except Exception as e:
+                    logger.error("Unexpected error during connection attempt %d: %s", attempt + 1, str(e))
+                    if attempt < 4:
+                        await asyncio.sleep(3)
+                    continue
+            logger.error("Failed to connect Telethon client after 5 attempts")
+            return False
+
+        except Exception as e:
+            logger.error("Failed to initialize Telethon client: %s", str(e))
+            return False
+
+    async def create_escrow_group(self, creator_id, creator_name, with_admins=True):
+        """Create a Telegram supergroup for escrow transactions"""
+        try:
+            if not self.initialized:
+                logger.info("Initializing Telethon client for group creation")
+                if not await self.initialize():
+                    logger.error("Telethon client initialization failed")
+                    return {"success": False, "error": "Telethon client not initialized"}
+
+            group_id = f"escrow_{creator_id}_{int(time.time())}"
+            group_name = f"@HoldEscrow #{group_id[-6:].upper()}"
+            logger.info("Creating group: %s", group_name)
+
+            # Create the supergroup
             result = await self.client(CreateChannelRequest(
                 title=group_name,
-                about=f"Secure escrow transaction • Created by {creator_name} • @HoldEscrowBot",
+                about=f"Secure escrow transaction group. Created by {creator_name}.",
                 megagroup=True
             ))
-            
+
             chat = result.chats[0]
             chat_id = chat.id
-            
-            # Get invite link
-            invite = await self.client(ExportChatInviteRequest(chat_id))
+            logger.info("Group created: chat_id=%d", chat_id)
+
+            # Export invite link
+            invite = await self.client(ExportChatInviteRequest(peer=chat_id))
             invite_link = invite.link
-            
-            # Add bot to group
-            bot_username = os.getenv("BOT_USERNAME", "HoldEscrowBot")
+            logger.info("Invite link generated: %s", invite_link)
+
+            # Add the bot to the group
             try:
-                bot_entity = await self.client.get_entity(bot_username)
-                await self.client(telethon.tl.functions.channels.InviteToChannelRequest(
-                    channel=chat,
-                    users=[bot_entity]
-                ))
-                
-                # Make bot admin
+                bot_entity = await self.client.get_entity(BOT_USERNAME)
+                await self.client(InviteToChannelRequest(channel=chat, users=[bot_entity]))
+                logger.info("Bot %s added to %s", BOT_USERNAME, group_name)
+            except Exception as e:
+                logger.error("Failed to add bot to group: %s", str(e))
+                return {"success": False, "error": f"Failed to add bot: {e}"}
+
+            # Promote bot to admin
+            try:
                 rights = ChatAdminRights(
                     change_info=True,
                     post_messages=True,
@@ -851,92 +779,207 @@ class TelegramGroupManager:
                     admin_rights=rights,
                     rank="Escrow Bot"
                 ))
-                logger.info("✅ Bot added and promoted successfully")
-                
+                logger.info("Bot promoted to admin in %s", group_name)
             except Exception as e:
-                logger.warning(f"⚠️ Could not add bot as admin: {e}")
-                # Continue anyway - user can add bot manually
-            
-            # Add creator to group
+                logger.warning("Failed to promote bot: %s", str(e))
+
+            # Add creator to the group
             try:
                 creator_entity = await self.client.get_entity(creator_id)
-                await self.client(telethon.tl.functions.channels.InviteToChannelRequest(
-                    channel=chat,
-                    users=[creator_entity]
-                ))
+                await self.client(InviteToChannelRequest(channel=chat, users=[creator_entity]))
+                logger.info("Creator %s added to %s", creator_id, group_name)
             except Exception as e:
-                logger.warning(f"⚠️ Could not add creator to group: {e}")
-            
+                logger.warning("Failed to add creator: %s", str(e))
+
             # Send welcome message
-            welcome_msg = f"""
-🏢 **Welcome to {group_name}**
+            welcome_msg = (
+                f"🏢 <b>Welcome to {group_name}</b>\n\n"
+                f"This is a secure escrow group created by @{creator_name}.\n\n"
+                f"<b>Group Rules:</b>\n"
+                f"• Only discuss the specific transaction\n"
+                f"• Be respectful to all parties\n"
+                f"• The escrow bot will monitor this conversation\n"
+                f"• Do not share sensitive personal information\n\n"
+                f"<b>To start a transaction:</b> Use /create in private chat with @{(await bot.get_me()).username}"
+            )
 
-This is a secure escrow group created by @{creator_name}.
+            try:
+                await self.client.send_message(entity=chat_id, message=welcome_msg, parse_mode='HTML')
+                logger.info("Welcome message sent to %s", group_name)
+            except Exception as e:
+                logger.warning("Failed to send welcome message: %s", str(e))
 
-**Group Rules:**
-• Only discuss the specific transaction
-• Be respectful to all parties
-• The escrow bot will monitor this conversation
-• Do not share sensitive personal information
+            # Save to database
+            cursor = self.conn.cursor()
+            cursor.execute('''
+                INSERT OR REPLACE INTO escrow_groups 
+                (group_id, chat_id, creator_id, invite_link, created_at, with_admins)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (group_id, chat_id, creator_id, invite_link, int(time.time()), int(with_admins)))
+            self.conn.commit()
+            logger.info("Group data saved to database")
 
-**To start:** Use /buyer or /seller commands to register.
-
-🔒 Secured by @HoldEscrowBot
-            """
-            
-            await self.client.send_message(chat_id, welcome_msg)
-            
             return {
                 "success": True,
                 "group_name": group_name,
                 "invite_link": invite_link,
-                "chat_id": chat_id,
-                "message": "Group created successfully! Share the invite link with the other party."
+                "chat_id": chat_id
             }
-            
+
+        except FloodWaitError as e:
+            logger.warning("Flood wait error: Must wait %d seconds", e.seconds)
+            await asyncio.sleep(e.seconds)
+            return {"success": False, "error": f"Flood wait: {e.seconds} seconds"}
+        except RPCError as e:
+            logger.error("Telegram RPC error creating group: %s", str(e))
+            return {"success": False, "error": str(e)}
         except Exception as e:
-            error_msg = f"Error creating group: {str(e)}"
-            logger.error(error_msg)
+            logger.error("Error creating group: %s", str(e))
+            return {"success": False, "error": str(e)}
+
+    async def create_verification_group(self, user_id: int, user_name: str, group_name: str):
+        """Create a Telegram supergroup for verification"""
+        try:
+            if not self.initialized:
+                logger.info("Initializing Telethon client for verification group")
+                if not await self.initialize():
+                    logger.error("Telethon client initialization failed")
+                    return {"success": False, "error": "Telethon client not initialized"}
+
+            result = await self.client(CreateChannelRequest(
+                title=group_name,
+                about=f"Verification group for {user_name}. Created by @HoldEscrowBot.",
+                megagroup=True
+            ))
+
+            chat = result.chats[0]
+            chat_id = chat.id
+            logger.info("Verification group created: chat_id=%d", chat_id)
+
+            # Export invite link
+            invite = await self.client(ExportChatInviteRequest(peer=chat_id))
+            invite_link = invite.link
+            logger.info("Invite link generated: %s", invite_link)
+
+            # Invite the user
+            try:
+                user_entity = await self.client.get_entity(user_id)
+                await self.client(InviteToChannelRequest(channel=chat, users=[user_entity]))
+                logger.info("User %s invited to verification group", user_name)
+            except Exception as e:
+                logger.warning("Could not invite user: %s", str(e))
+
+            # Invite the bot
+            if BOT_USERNAME:
+                try:
+                    bot_entity = await self.client.get_entity(BOT_USERNAME)
+                    await self.client(InviteToChannelRequest(channel=chat, users=[bot_entity]))
+                    logger.info("Bot %s invited to verification group", BOT_USERNAME)
+                except Exception as e:
+                    logger.warning("Could not invite bot: %s", str(e))
+
+            # Promote the bot to admin
+            if BOT_USERNAME:
+                try:
+                    bot_entity = await self.client.get_entity(BOT_USERNAME)
+                    rights = ChatAdminRights(
+                        change_info=True,
+                        post_messages=True,
+                        edit_messages=True,
+                        delete_messages=True,
+                        ban_users=True,
+                        invite_users=True,
+                        pin_messages=True,
+                        add_admins=False,
+                        manage_call=True,
+                        other=True
+                    )
+                    await self.client(telethon.tl.functions.channels.EditAdminRequest(
+                        channel=chat,
+                        user_id=bot_entity,
+                        admin_rights=rights,
+                        rank="Verification Bot"
+                    ))
+                    logger.info("Bot promoted to admin in verification group")
+                except Exception as e:
+                    logger.warning("Failed to promote bot: %s", str(e))
+
             return {
-                "success": False,
-                "error": error_msg,
-                "fallback_instructions": self._get_fallback_instructions()
+                "success": True,
+                "group_name": group_name,
+                "invite_link": invite_link,
+                "chat_id": chat_id
             }
-    
-    def _get_fallback_instructions(self):
-        """Get instructions for manual group creation"""
-        return """
-📋 **Manual Group Creation Instructions**
 
-Since automated group creation is unavailable, please:
+        except FloodWaitError as e:
+            logger.warning("Flood wait error: Must wait %d seconds", e.seconds)
+            await asyncio.sleep(e.seconds)
+            return {"success": False, "error": f"Flood wait: {e.seconds} seconds"}
+        except RPCError as e:
+            logger.error("Telegram RPC error creating verification group: %s", str(e))
+            return {"success": False, "error": str(e)}
+        except Exception as e:
+            logger.error("Error creating verification group: %s", str(e))
+            return {"success": False, "error": str(e)}
 
-1. **Create a new group** in Telegram
-2. **Add @HoldEscrowBot** to the group
-3. **Make the bot an administrator** with these permissions:
-   • Delete messages
-   • Ban users  
-   • Pin messages
-   • Invite users
+    async def add_user_to_group(self, group_id, user_id):
+        """Add a user to the group"""
+        try:
+            if not self.initialized:
+                logger.info("Initializing Telethon client for adding user")
+                if not await self.initialize():
+                    logger.error("Telethon client initialization failed")
+                    return False
 
-4. **Set group permissions** to restrict member adding
-5. **Use these commands** in the group:
-   • `/buyer [your_wallet_address]`
-   • `/seller [your_wallet_address]`
+            user_entity = await self.client.get_input_entity(user_id)
+            await self.client(InviteToChannelRequest(channel=group_id, users=[user_entity]))
+            logger.info("User %s added to group %s", user_id, group_id)
+            return True
+        except Exception as e:
+            logger.error("Error adding user to group: %s", str(e))
+            return False
 
-Need help? Contact @HoldEscrowSupport
-        """
-    
-    async def safe_shutdown(self):
-        """Safely shutdown the Telethon client"""
-        if self.client and self.client.is_connected():
+    async def _promote_all_members(self, chat):
+        """Promote every current member of the chat to admin with standard rights."""
+        try:
+            rights = ChatAdminRights(
+                change_info=True,
+                post_messages=True,
+                edit_messages=True,
+                delete_messages=True,
+                ban_users=True,
+                invite_users=True,
+                pin_messages=True,
+                add_admins=False,
+                manage_call=True,
+                other=True
+            )
+
+            async for participant in self.client.iter_participants(chat):
+                try:
+                    await self.client(telethon.tl.functions.channels.EditAdminRequest(
+                        channel=chat,
+                        user_id=participant,
+                        admin_rights=rights,
+                        rank="Admin"
+                    ))
+                    logger.info("Promoted %s to admin", getattr(participant, 'id', 'unknown'))
+                except Exception as inner_err:
+                    logger.warning("Failed to promote %s: %s", getattr(participant, 'id', 'unknown'), str(inner_err))
+        except Exception as outer_err:
+            logger.error("Promote all members error: %s", str(outer_err))
+
+    async def disconnect(self):
+        """Disconnect the client gracefully"""
+        if self.client and self.initialized:
             try:
                 await self.client.disconnect()
-                logger.info("✅ Telethon client disconnected safely")
+                logger.info("Telethon client disconnected")
             except Exception as e:
-                logger.error(f"Error disconnecting Telethon client: {e}")
-        self.initialized = False
+                logger.warning("Error disconnecting client: %s", str(e))
+            finally:
+                self.initialized = False
 
-# Global instance
 group_manager = TelegramGroupManager()
 
 # Simple rate limiting
@@ -1179,7 +1222,7 @@ async def cmd_create(message: types.Message, state: FSMContext):
     cursor.execute('SELECT COUNT(*) FROM escrow_groups WHERE creator_id = ?', (message.from_user.id,))
     group_count = cursor.fetchone()[0]
 
-    if group_count >= 15:  # Limit to 10 groups per user
+    if group_count >= 10:  # Limit to 10 groups per user
         # Get user's active groups
         cursor.execute('SELECT chat_id, invite_link FROM escrow_groups WHERE creator_id = ?',
                        (message.from_user.id,))
@@ -1940,7 +1983,7 @@ async def seller_command(message: types.Message):
         "Always verify the escrow address in the verification group before sending funds.\n\n"
         "💡 <b>NEXT STEPS</b>\n"
         "1. Buyer sends funds to escrow address\n"
-        "2. Share transaction hash using /blockchain [hash]\n"
+        "2. Share transaction hash using /track [hash]\n"
         "3. Seller fulfills obligations\n"
         "4. Buyer releases funds with /release\n\n"
         "⚡ <i>Secure trading with @HoldEscrowBot</i>"
@@ -1960,7 +2003,7 @@ async def seller_command(message: types.Message):
     verification_instruction = (
         "🔍 <b>VERIFICATION REQUIRED</b>\n\n"
         f"@{buyer_username}, please verify the escrow address in the verification group before sending funds.\n\n"
-        "After verification, send the agreed amount and use /blockchain [hash] to monitor your transaction."
+        "After verification, send the agreed amount and use /track [hash] to monitor your transaction."
     )
     
     # Send verification instruction
@@ -2570,40 +2613,120 @@ def format_tracking_response(result: dict, tx_hash: str, coin_type: str) -> str:
 # -----------------------
 @dp.message(Command("balance"))
 async def balance_command(message: types.Message):
+    """Check escrow balance for active transactions"""
     user_id = message.from_user.id
-    conn = sqlite3.connect("escrow_bot.db")
-    cursor = conn.cursor()
+    
+    try:
+        # Use proper DB_PATH constant
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
 
-    cursor.execute('''
-        SELECT amount_received, coin, escrow_address, payment_tx_hash 
-        FROM transactions 
-        WHERE (buyer_id = ? OR seller_id = ?) 
-        ORDER BY created_at DESC LIMIT 1
-    ''', (user_id, user_id))
+        # Query for active transactions (not released or refunded)
+        cursor.execute('''
+            SELECT tx_id, amount_received, coin, wallet as escrow_address, 
+                   tx_hash as payment_tx_hash, status, description, created_at,
+                   buyer_id, seller_id
+            FROM transactions 
+            WHERE (buyer_id = ? OR seller_id = ?) 
+            AND status IN ('pending', 'confirmed', 'paid')
+            AND amount_received > 0
+            ORDER BY created_at DESC
+        ''', (user_id, user_id))
 
-    tx_data = cursor.fetchone()
-    conn.close()
+        transactions = cursor.fetchall()
+        conn.close()
 
-    if not tx_data or not tx_data[0]:
-        await message.reply("No transactions found or no payments received yet.")
-        return
+        if not transactions:
+            await message.reply(
+                "💼 **No Active Escrow Balance**\n\n"
+                "You don't have any active transactions with funds in escrow.\n\n"
+                "💡 Use /start to create a new escrow transaction."
+            )
+            return
 
-    amount, coin, escrow_address, tx_hash = tx_data
-    amount_formatted = format_crypto_amount(amount, coin)
+        # Calculate total balance and prepare detailed response
+        total_balance = {}
+        active_transactions = []
+        
+        for tx in transactions:
+            tx_id, amount, coin, escrow_address, tx_hash, status, description, created_at, buyer_id, seller_id = tx
+            
+            # Determine user role
+            user_role = "Buyer" if buyer_id == user_id else "Seller"
+            
+            # Add to total balance
+            if coin not in total_balance:
+                total_balance[coin] = 0
+            total_balance[coin] += amount or 0
+            
+            # Format transaction info
+            amount_formatted = format_crypto_amount(amount, coin)
+            active_transactions.append({
+                'tx_id': tx_id,
+                'amount': amount_formatted,
+                'coin': coin,
+                'status': status,
+                'role': user_role,
+                'escrow_address': escrow_address,
+                'tx_hash': tx_hash,
+                'description': description
+            })
 
-    balance_msg = (
-        "💼 **Escrow Balance Summary**\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
-        f"💰 **Amount:** {amount_formatted} {coin}\n"
-        f"🔗 **Transaction Hash:** `{tx_hash}`\n"
-        f"🏦 **Escrow Address:** `{escrow_address}`\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "✅ Funds are securely held in escrow\n"
-        "📋 Use /pay_seller to complete transaction\n"
-        "🔄 Use /refund_buyer to cancel transaction"
-    )
+        # Build response message
+        balance_msg = "💼 **Your Escrow Balance**\n\n"
+        
+        # Show total balance by coin
+        if total_balance:
+            balance_msg += "💰 **Total Balance:**\n"
+            for coin, total in total_balance.items():
+                formatted_total = format_crypto_amount(total, coin)
+                balance_msg += f"   • {formatted_total} {coin}\n"
+            balance_msg += "\n"
+        
+        balance_msg += "📋 **Active Transactions:**\n"
+        balance_msg += "━━━━━━━━━━━━━━━━━━━━━\n"
+        
+        for i, tx in enumerate(active_transactions[:3], 1):  # Show max 3 transactions
+            status_emoji = {
+                'pending': '⏳',
+                'confirmed': '✅', 
+                'paid': '💰'
+            }.get(tx['status'], '❓')
+            
+            balance_msg += f"{status_emoji} **Transaction #{i}** ({tx['role']})\n"
+            balance_msg += f"   💰 Amount: {tx['amount']} {tx['coin']}\n"
+            balance_msg += f"   📊 Status: {tx['status'].title()}\n"
+            if tx['tx_hash']:
+                balance_msg += f"   🔗 TX Hash: `{tx['tx_hash'][:16]}...`\n"
+            if tx['escrow_address']:
+                balance_msg += f"   🏦 Address: `{tx['escrow_address'][:16]}...`\n"
+            balance_msg += "\n"
+        
+        if len(active_transactions) > 3:
+            balance_msg += f"... and {len(active_transactions) - 3} more transactions\n\n"
+        
+        balance_msg += "━━━━━━━━━━━━━━━━━━━━━\n"
+        balance_msg += "✅ Funds are securely held in escrow\n"
+        balance_msg += "📋 Use /release to complete transaction\n"
+        balance_msg += "🔄 Use /refund to cancel transaction\n"
+        balance_msg += "📊 Use /status for detailed transaction info"
 
-    await message.reply(balance_msg, parse_mode="Markdown")
+        await message.reply(balance_msg, parse_mode="Markdown")
+        
+    except sqlite3.Error as e:
+        logger.error(f"Database error in balance command: {e}")
+        await message.reply(
+            "❌ **Database Error**\n\n"
+            "Sorry, there was an error accessing your balance information. "
+            "Please try again later or contact support."
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error in balance command: {e}")
+        await message.reply(
+            "❌ **Error**\n\n"
+            "An unexpected error occurred while checking your balance. "
+            "Please try again later."
+        )
 
 
 def format_crypto_amount(amount, coin_type):
@@ -2997,7 +3120,7 @@ async def generate_escrow_address(chat_id: int):
         f"### IMPORTANT: AVOID SCAMS!\n\n"
         f"- Always verify the escrow address by sending it to the Verification Group before sending funds.\n"
         f"- COMMANDS:\n"
-        f"  /pay_seller - pay funds to seller.\n"
+        f"  /pay_seller - Release funds to seller.\n"
         f"  /refund_buyer - Return funds to buyer.\n"
         f"- Multiple payments accepted to same address.\n"
         f"- DESCRIPTION\n\n"
