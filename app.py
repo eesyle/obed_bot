@@ -13,6 +13,8 @@ import sqlite3
 import random
 import textwrap
 import re
+import base64
+import binascii
 from PIL import Image, ImageDraw, ImageFont
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from deep_translator import GoogleTranslator
@@ -43,6 +45,10 @@ from telethon.errors import SessionPasswordNeededError, FloodWaitError, RPCError
 # Configure logging for detailed debugging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+# Telethon session string - stored directly to avoid environment variable issues
+TELETHON_SESSION_STRING = "1AZWarzYBu0qSqwbGvlaCOVF53pWeqoEOpooiVPNsRUiPw5FvHEVIWMOWZnkBtHxCsnp82v3kLdRGT2hNPsfNKCjmkUZKAh4cNbEcsOkMkcosndhGsVKGmjCIlYwx7UH8hhquedYF3Opoj-H6YzU6fGaMt6mFLcJLtzQQU24X6b0yWKVaBKAEOz997AG-v_XKZvCokwejR4peGZKkK4QgvFuBrCnZqVOhExQqumTZYMfSPYu642ueJVr-wqC_XTOYSG4ZjDlhRZ9pRxshPgIUBuoK16Lc54OsNnt3DG4CyOpeiVnJF8hnLph8ZZQmkYXA51RwqbPcDDS_uAVMsh2jHBhJ5aRUKK0="
+
 # Load environment variables
 load_dotenv()
 
@@ -661,6 +667,38 @@ def generate_referral_code() -> str:
     chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
     return ''.join(random.choice(chars) for _ in range(Config.REFERRAL_CODE_LENGTH))
 
+def decode_render_session_string(encoded_string):
+    """
+    Decode a Render-safe encoded session string back to original format.
+    
+    Args:
+        encoded_string (str): Hex-encoded session string from Render environment
+        
+    Returns:
+        str: Original session string or None if decoding fails
+    """
+    try:
+        # Check if it's already a regular session string (contains special chars)
+        if any(char in encoded_string for char in ['-', '_', '+', '/', '=']):
+            logger.info("Session string appears to be in regular format, using as-is")
+            return encoded_string
+            
+        # Try to decode from hex format
+        logger.info("Attempting to decode hex-encoded session string")
+        hex_bytes = binascii.unhexlify(encoded_string)
+        b64_decoded = base64.b64decode(hex_bytes)
+        original_string = b64_decoded.decode('utf-8')
+        logger.info("Successfully decoded session string from Render format")
+        return original_string
+        
+    except (binascii.Error, base64.binascii.Error, UnicodeDecodeError) as e:
+        logger.warning(f"Failed to decode session string: {e}")
+        logger.info("Treating as regular session string")
+        return encoded_string
+    except Exception as e:
+        logger.error(f"Unexpected error decoding session string: {e}")
+        return None
+
 # ========================
 # DATABASE CLASSES
 # ========================
@@ -670,13 +708,8 @@ class TelegramGroupManager:
     def __init__(self):
         self.client = None
         self.initialized = False
-        self.session_string = None
-        
-        # Use environment variable for session string
-        self.session_string = os.getenv('TELETHON_SESSION_STRING')
-        
-        if not self.session_string:
-            logger.warning("TELETHON_SESSION_STRING not found in environment variables")
+        # Use the hardcoded session string to avoid environment variable issues
+        self.session_string = TELETHON_SESSION_STRING
 
     async def initialize(self):
         """Initialize the Telethon client with session string"""
@@ -691,7 +724,12 @@ class TelegramGroupManager:
 
             # Create a memory session from the string
             from telethon.sessions import StringSession
-            session = StringSession(self.session_string)
+            try:
+                session = StringSession(self.session_string)
+            except ValueError as e:
+                logger.error(f"Invalid session string format: {e}")
+                logger.error("Please generate a new session string using generate_session_string.py")
+                return False
             
             self.client = TelegramClient(
                 session=session,
