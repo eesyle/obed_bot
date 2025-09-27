@@ -4,6 +4,7 @@ from datetime import datetime
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 from aiogram import Bot, Dispatcher, types, Router
+from telethon.errors import SessionPasswordNeededError, AuthKeyError
 from aiogram.client.session import aiohttp
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.filters import Command
