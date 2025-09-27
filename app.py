@@ -7,6 +7,8 @@ from aiogram import Bot, Dispatcher, types, Router
 from telethon.errors import SessionPasswordNeededError, AuthKeyError
 from aiogram.client.session import aiohttp
 from aiogram.fsm.storage.memory import MemoryStorage
+from telethon.sessions import StringSession
+from telethon.errors import SessionPasswordNeededError, AuthKeyError, ApiIdInvalidError
 from aiogram.filters import Command
 from dotenv import load_dotenv
 import sqlite3
@@ -46,8 +48,7 @@ from telethon.errors import SessionPasswordNeededError, FloodWaitError, RPCError
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Telethon session string - stored directly to avoid environment variable issues
-TELETHON_SESSION_STRING = "1AZWarzYBu0qSqwbGvlaCOVF53pWeqoEOpooiVPNsRUiPw5FvHEVIWMOWZnkBtHxCsnp82v3kLdRGT2hNPsfNKCjmkUZKAh4cNbEcsOkMkcosndhGsVKGmjCIlYwx7UH8hhquedYF3Opoj-H6YzU6fGaMt6mFLcJLtzQQU24X6b0yWKVaBKAEOz997AG-v_XKZvCokwejR4peGZKkK4QgvFuBrCnZqVOhExQqumTZYMfSPYu642ueJVr-wqC_XTOYSG4ZjDlhRZ9pRxshPgIUBuoK16Lc54OsNnt3DG4CyOpeiVnJF8hnLph8ZZQmkYXA51RwqbPcDDS_uAVMsh2jHBhJ5aRUKK0="
+
 
 # Load environment variables
 load_dotenv()
@@ -708,170 +709,232 @@ class TelegramGroupManager:
     def __init__(self):
         self.client = None
         self.initialized = False
-        # Use the hardcoded session string to avoid environment variable issues
-        self.session_string = TELETHON_SESSION_STRING
-
+        self.session_string = None
+        self.last_error = None
+        
     async def initialize(self):
-        """Initialize the Telethon client with session string"""
+        """Initialize Telethon client with robust error handling"""
         try:
-            if not all([os.getenv("TELEGRAM_API_ID"), os.getenv("TELEGRAM_API_HASH")]):
-                logger.error("Telegram API credentials not found")
-                return False
-
-            if not self.session_string:
-                logger.error("Telethon session string not available")
-                return False
-
-            # Create a memory session from the string
-            from telethon.sessions import StringSession
-            try:
-                session = StringSession(self.session_string)
-            except ValueError as e:
-                logger.error(f"Invalid session string format: {e}")
-                logger.error("Please generate a new session string using generate_session_string.py")
+            # Get credentials from environment
+            api_id = os.getenv("TELEGRAM_API_ID")
+            api_hash = os.getenv("TELEGRAM_API_HASH")
+            session_string = os.getenv("TELETHON_SESSION_STRING")
+            
+            if not all([api_id, api_hash, session_string]):
+                self.last_error = "Missing Telethon credentials in environment variables"
+                logger.error(self.last_error)
                 return False
             
+            # Clean and validate session string
+            session_string = session_string.strip()
+            if len(session_string) < 200:
+                self.last_error = f"Session string too short ({len(session_string)} chars), expected 200+"
+                logger.error(self.last_error)
+                return False
+            
+            logger.info(f"Attempting to initialize Telethon with session string ({len(session_string)} chars)")
+            
+            # Create StringSession
+            try:
+                session = StringSession(session_string)
+            except Exception as e:
+                self.last_error = f"Invalid session string format: {e}"
+                logger.error(self.last_error)
+                return False
+            
+            # Create client
             self.client = TelegramClient(
                 session=session,
-                api_id=int(os.getenv("TELEGRAM_API_ID")),
-                api_hash=os.getenv("TELEGRAM_API_HASH")
+                api_id=int(api_id),
+                api_hash=api_hash
             )
-
-            await self.client.connect()
-
+            
+            # Set longer timeouts for cloud environments
+            self.client.session.set_dc(2, '149.154.167.40', 443)
+            
+            # Connect with timeout
+            await asyncio.wait_for(self.client.connect(), timeout=10)
+            
             if not await self.client.is_user_authorized():
-                logger.error("Telethon session not authorized. Please generate a new session string.")
+                self.last_error = "Session not authorized. Please generate a new session string."
+                logger.error(self.last_error)
+                await self.client.disconnect()
                 return False
-
+            
+            # Test connection
+            me = await self.client.get_me()
+            logger.info(f"✅ Telethon initialized successfully for user: {me.first_name} (@{me.username})")
+            
             self.initialized = True
-            logger.info("Telethon client initialized successfully with string session")
+            self.last_error = None
             return True
-
+            
+        except ApiIdInvalidError as e:
+            self.last_error = f"Invalid API ID/Hash: {e}"
+            logger.error(self.last_error)
+            return False
         except AuthKeyError as e:
-            logger.error(f"AuthKeyError: Session is invalid. Generate a new session string. Error: {e}")
+            self.last_error = f"Auth key error: {e}. Generate new session string."
+            logger.error(self.last_error)
+            return False
+        except SessionPasswordNeededError:
+            self.last_error = "2FA password required. Use interactive session generation."
+            logger.error(self.last_error)
+            return False
+        except asyncio.TimeoutError:
+            self.last_error = "Connection timeout. Check network connectivity."
+            logger.error(self.last_error)
             return False
         except Exception as e:
-            logger.error(f"Failed to initialize Telethon client: {e}")
+            self.last_error = f"Unexpected error during initialization: {e}"
+            logger.error(self.last_error)
             return False
-
+    
     async def create_escrow_group(self, creator_id, creator_name, with_admins=True):
-        """Create a Telegram supergroup for escrow transactions"""
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                if not self.initialized:
-                    if not await self.initialize():
-                        return {"success": False, "error": "Telethon client not initialized"}
-
-                # Generate unique group name
-                group_id = f"escrow_{creator_id}_{int(time.time())}"
-                group_name = f"HoldEscrowBot Escrow #{group_id[-6:].upper()}"
-
-                # Create the supergroup
-                result = await self.client(CreateChannelRequest(
-                    title=group_name,
-                    about=f"Secure escrow transaction group. Created by {creator_name}.",
-                    megagroup=True
-                ))
-
-                chat = result.chats[0]
-                chat_id = chat.id
-
-                # Export invite link
-                invite = await self.client(ExportChatInviteRequest(chat_id))
-                invite_link = invite.link
-
-                # Add the bot to the group first
-                try:
-                    bot_username = os.getenv("BOT_USERNAME", "HoldEscrowBot")
-                    bot_entity = await self.client.get_entity(bot_username)
-                    await self.client(telethon.tl.functions.channels.InviteToChannelRequest(
-                        channel=chat,
-                        users=[bot_entity]
-                    ))
-                    logger.info(f"✅ Bot {bot_username} added to {group_name}")
-                except Exception as e:
-                    logger.error(f"❌ Failed to add bot to group: {e}")
-                    return {"success": False, "error": f"Failed to add bot: {e}"}
-
-                # Promote bot to admin with necessary rights
-                try:
-                    rights = ChatAdminRights(
-                        change_info=True,
-                        post_messages=True,
-                        edit_messages=True,
-                        delete_messages=True,
-                        ban_users=True,
-                        invite_users=True,
-                        pin_messages=True,
-                        add_admins=False,
-                        manage_call=True,
-                        other=True
-                    )
-                    await self.client(telethon.tl.functions.channels.EditAdminRequest(
-                        channel=chat,
-                        user_id=bot_entity,
-                        admin_rights=rights,
-                        rank="Escrow Bot"
-                    ))
-                    logger.info(f"✅ Bot promoted to admin in {group_name}")
-                except Exception as e:
-                    logger.warning(f"⚠️ Failed to promote bot: {e}")
-
-                # Add creator to the group
-                try:
-                    creator_entity = await self.client.get_entity(creator_id)
-                    await self.client(telethon.tl.functions.channels.InviteToChannelRequest(
-                        channel=chat,
-                        users=[creator_entity]
-                    ))
-                    logger.info(f"✅ Creator added to {group_name}")
-                except Exception as e:
-                    logger.warning(f"⚠️ Failed to add creator: {e}")
-
-                # Send welcome message
-                welcome_msg = (
-                    f"🏢 <b>Welcome to {group_name}</b>\n\n"
-                    f"This is a secure escrow group created by @{creator_name}.\n\n"
-                    f"<b>Group Rules:</b>\n"
-                    f"• Only discuss the specific transaction\n"
-                    f"• Be respectful to all parties\n"
-                    f"• The escrow bot will monitor this conversation\n"
-                    f"• Do not share sensitive personal information\n\n"
-                    f"<b>To start a transaction:</b> Use /create in private chat with @{bot_username}"
-                )
-
-                await self.client.send_message(
-                    entity=chat_id,
-                    message=welcome_msg,
-                    parse_mode='HTML'
-                )
-
+        """Create escrow group with comprehensive error handling"""
+        if not self.initialized:
+            init_result = await self.initialize()
+            if not init_result:
                 return {
-                    "success": True,
-                    "group_name": group_name,
-                    "invite_link": invite_link,
-                    "chat_id": chat_id
+                    "success": False, 
+                    "error": f"Telethon not initialized: {self.last_error}",
+                    "fallback_instructions": self._get_fallback_instructions()
                 }
-
-            except AuthKeyError as e:
-                logger.error(f"AuthKeyError on attempt {attempt + 1}: {e}")
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(2)
-                    continue
-                return {"success": False, "error": "Session authorization failed"}
+        
+        try:
+            logger.info(f"Creating escrow group for user {creator_id} ({creator_name})")
+            
+            # Generate unique group name
+            timestamp = int(time.time())
+            group_id = f"escrow_{creator_id}_{timestamp}"
+            group_name = f"HoldEscrow Escrow #{str(timestamp)[-6:]}"
+            
+            # Create supergroup
+            result = await self.client(CreateChannelRequest(
+                title=group_name,
+                about=f"Secure escrow transaction • Created by {creator_name} • @HoldEscrowBot",
+                megagroup=True
+            ))
+            
+            chat = result.chats[0]
+            chat_id = chat.id
+            
+            # Get invite link
+            invite = await self.client(ExportChatInviteRequest(chat_id))
+            invite_link = invite.link
+            
+            # Add bot to group
+            bot_username = os.getenv("BOT_USERNAME", "HoldEscrowBot")
+            try:
+                bot_entity = await self.client.get_entity(bot_username)
+                await self.client(telethon.tl.functions.channels.InviteToChannelRequest(
+                    channel=chat,
+                    users=[bot_entity]
+                ))
+                
+                # Make bot admin
+                rights = ChatAdminRights(
+                    change_info=True,
+                    post_messages=True,
+                    edit_messages=True,
+                    delete_messages=True,
+                    ban_users=True,
+                    invite_users=True,
+                    pin_messages=True,
+                    add_admins=False,
+                    manage_call=True,
+                    other=True
+                )
+                await self.client(telethon.tl.functions.channels.EditAdminRequest(
+                    channel=chat,
+                    user_id=bot_entity,
+                    admin_rights=rights,
+                    rank="Escrow Bot"
+                ))
+                logger.info("✅ Bot added and promoted successfully")
+                
             except Exception as e:
-                logger.error(f"Error creating group on attempt {attempt + 1}: {e}")
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(2)
-                    continue
-                return {"success": False, "error": str(e)}
+                logger.warning(f"⚠️ Could not add bot as admin: {e}")
+                # Continue anyway - user can add bot manually
+            
+            # Add creator to group
+            try:
+                creator_entity = await self.client.get_entity(creator_id)
+                await self.client(telethon.tl.functions.channels.InviteToChannelRequest(
+                    channel=chat,
+                    users=[creator_entity]
+                ))
+            except Exception as e:
+                logger.warning(f"⚠️ Could not add creator to group: {e}")
+            
+            # Send welcome message
+            welcome_msg = f"""
+🏢 **Welcome to {group_name}**
 
+This is a secure escrow group created by @{creator_name}.
+
+**Group Rules:**
+• Only discuss the specific transaction
+• Be respectful to all parties
+• The escrow bot will monitor this conversation
+• Do not share sensitive personal information
+
+**To start:** Use /buyer or /seller commands to register.
+
+🔒 Secured by @HoldEscrowBot
+            """
+            
+            await self.client.send_message(chat_id, welcome_msg)
+            
+            return {
+                "success": True,
+                "group_name": group_name,
+                "invite_link": invite_link,
+                "chat_id": chat_id,
+                "message": "Group created successfully! Share the invite link with the other party."
+            }
+            
+        except Exception as e:
+            error_msg = f"Error creating group: {str(e)}"
+            logger.error(error_msg)
+            return {
+                "success": False,
+                "error": error_msg,
+                "fallback_instructions": self._get_fallback_instructions()
+            }
+    
+    def _get_fallback_instructions(self):
+        """Get instructions for manual group creation"""
+        return """
+📋 **Manual Group Creation Instructions**
+
+Since automated group creation is unavailable, please:
+
+1. **Create a new group** in Telegram
+2. **Add @HoldEscrowBot** to the group
+3. **Make the bot an administrator** with these permissions:
+   • Delete messages
+   • Ban users  
+   • Pin messages
+   • Invite users
+
+4. **Set group permissions** to restrict member adding
+5. **Use these commands** in the group:
+   • `/buyer [your_wallet_address]`
+   • `/seller [your_wallet_address]`
+
+Need help? Contact @HoldEscrowSupport
+        """
+    
     async def safe_shutdown(self):
         """Safely shutdown the Telethon client"""
         if self.client and self.client.is_connected():
-            await self.client.disconnect()
-            self.initialized = False
+            try:
+                await self.client.disconnect()
+                logger.info("✅ Telethon client disconnected safely")
+            except Exception as e:
+                logger.error(f"Error disconnecting Telethon client: {e}")
+        self.initialized = False
 
 # Global instance
 group_manager = TelegramGroupManager()
@@ -1116,7 +1179,7 @@ async def cmd_create(message: types.Message, state: FSMContext):
     cursor.execute('SELECT COUNT(*) FROM escrow_groups WHERE creator_id = ?', (message.from_user.id,))
     group_count = cursor.fetchone()[0]
 
-    if group_count >= 10:  # Limit to 10 groups per user
+    if group_count >= 15:  # Limit to 10 groups per user
         # Get user's active groups
         cursor.execute('SELECT chat_id, invite_link FROM escrow_groups WHERE creator_id = ?',
                        (message.from_user.id,))
